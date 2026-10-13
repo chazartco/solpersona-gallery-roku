@@ -4,6 +4,9 @@
   "private": true,
   "description": "SolPersona Gallery for Roku: a SceneGraph channel that turns a Roku into a gallery screen.",
   "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "build": "bsc --project bsconfig.json",
     "lint": "bsc --project bsconfig.json --create-package false",
@@ -20,5 +23,8 @@
     "qrcode": "1.5.4",
     "roku-deploy": "3.18.4",
     "rooibos-roku": "5.17.0"
+  },
+  "allowScripts": {
+    "restana": false
   }
 }

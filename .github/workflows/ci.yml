@@ -11,12 +11,18 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 24 is the LTS the build ships from (.nvmrc); 26 is the newest release.
+        node: [24, 26]
+    name: build (Node ${{ matrix.node }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install
@@ -34,7 +40,9 @@ jobs:
       - name: Build the sideloadable zip
         run: make zip
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload the zip
+        if: matrix.node == 24
+        uses: actions/upload-artifact@v7
         with:
           name: solpersona-gallery-roku
           path: build/solpersona-gallery-roku.zip

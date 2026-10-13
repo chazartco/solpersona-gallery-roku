@@ -31,7 +31,7 @@ are in [`docs/CONFORMANCE-RESULTS.md`](docs/CONFORMANCE-RESULTS.md).</sub>
 1. **Developer mode on the Roku.** With the Roku remote press
    Home ×3, Up ×2, Right, Left, Right, Left, Right. Accept the agreement, choose
    a password, and note the address it shows (e.g. `http://192.168.1.40`).
-2. **Get the code and tools.** Node 22 and `make`:
+2. **Get the code and tools.** Node 24 or newer (`.nvmrc` pins 24) and `make`:
    ```sh
    git clone <this repo> && cd solpersona-gallery-roku
    npm ci

@@ -11,7 +11,7 @@ Allow about two hours for a first full pass on one device.
 
 - A **Roku TV** and a **Roku streaming stick or box** on the same network as
   your computer. Wired or 5 GHz Wi-Fi is better for the video checks.
-- A computer with **Node 22**, **make** and this repository (`npm ci` done).
+- A computer with **Node 24** or newer, **make** and this repository (`npm ci` done).
 - A phone, to scan QR codes.
 - Something to link the Roku to. Either:
   - the **mock server** in this repo (`make mock`), which needs nothing else; or
