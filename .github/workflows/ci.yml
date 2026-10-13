@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # BrighterScript compile + bslint, and the namespace-shadowing audit.
+      - name: Lint
+        run: make lint
+
+      # The Rooibos suites (clock vectors, image choice, schedule, sync and
+      # pairing state machines) run headless in brs-node — no Roku needed.
+      - name: Unit tests
+        run: make test
+
+      - name: Build the sideloadable zip
+        run: make zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: solpersona-gallery-roku
+          path: build/solpersona-gallery-roku.zip
+          if-no-files-found: error

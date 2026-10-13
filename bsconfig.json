@@ -1,0 +1,22 @@
+{
+  "rootDir": "./",
+  "files": [
+    "manifest",
+    "source/**/*",
+    "components/**/*",
+    "images/**/*",
+    "fonts/**/*",
+    "media/**/*"
+  ],
+  "stagingDir": "build/staging",
+  "outFile": "build/solpersona-gallery-roku.zip",
+  "createPackage": true,
+  "retainStagingDir": true,
+  "sourceMap": false,
+  "autoImportComponentScript": true,
+  "plugins": ["@rokucommunity/bslint"],
+  "lintConfig": "bslint.json",
+  "diagnosticFilters": [
+    { "src": "node_modules/**/*" }
+  ]
+}

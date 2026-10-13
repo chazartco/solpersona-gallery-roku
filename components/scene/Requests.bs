@@ -1,0 +1,134 @@
+' Talking to the two tasks. Every request carries an id; its answer is routed
+' back by `kind` to the section that asked. Stamps from the task (wall clock)
+' are moved onto the monotonic scale here, so the clock (SPEC §5.1) sees
+' sentAt / receivedAt on the same scale as now().
+
+sub initRequests()
+    m.reqSeq = 0
+    m.pending = {}
+    m.mediaPending = {}
+
+    m.api = CreateObject("roSGNode", "ApiTask")
+    m.api.baseUrl = m.config.baseUrl
+    if m.device <> invalid then m.api.token = m.device.token
+    m.api.ObserveField("response", "onApiResponse")
+    m.api.control = "RUN"
+
+    m.media = CreateObject("roSGNode", "MediaTask")
+    m.media.ObserveField("response", "onMediaResponse")
+    m.media.ObserveField("storage", "onStorage")
+    m.media.control = "RUN"
+end sub
+
+function apiSend(kind as string, method as string, path as string, body as string, auth as boolean, ctx as object) as integer
+    m.reqSeq += 1
+    ctx.kind = kind
+    ctx.path = path
+    ctx.method = method
+    m.pending[m.reqSeq.ToStr()] = ctx
+    req = { id: m.reqSeq, method: method, path: path, body: body, auth: auth }
+    if ctx.toFile <> invalid then req.toFile = ctx.toFile
+    m.api.request = req
+    return m.reqSeq
+end function
+
+sub onApiResponse(event as object)
+    try
+        handleApiResponse(event.GetData())
+    catch e
+        noteFailure("api", e)
+    end try
+end sub
+
+sub handleApiResponse(r as dynamic)
+    if not Util.isAA(r) then return
+    key = Str(r.id).Trim()
+    ctx = m.pending[key]
+    if ctx = invalid then return
+    m.pending.Delete(key)
+    r.sentAt = Clock.wallToMono(m.mono, Util.num(r.sentAt))
+    r.receivedAt = Clock.wallToMono(m.mono, Util.num(r.receivedAt))
+    logCall(ctx.method, ctx.path, r)
+
+    kind = ctx.kind
+    if kind = "register" then
+        onRegisterResponse(r, ctx)
+    else if kind = "token" then
+        onTokenResponse(r, ctx)
+    else if kind = "sync" then
+        onSyncResponse(r, ctx)
+    else if kind = "sample" then
+        onSampleResponse(r, ctx)
+    else if kind = "qr" then
+        onQrResponse(r, ctx)
+    else if kind = "forget" then
+        unlinkLocally()
+    end if
+end sub
+
+function mediaSend(op as string, payload as object, ctx as object) as integer
+    m.reqSeq += 1
+    payload.id = m.reqSeq
+    payload.op = op
+    ctx.op = op
+    m.mediaPending[m.reqSeq.ToStr()] = ctx
+    m.media.request = payload
+    return m.reqSeq
+end function
+
+sub onMediaResponse(event as object)
+    try
+        handleMediaResponse(event.GetData())
+    catch e
+        noteFailure("media", e)
+    end try
+end sub
+
+sub handleMediaResponse(r as dynamic)
+    if not Util.isAA(r) then return
+    key = Str(r.id).Trim()
+    ctx = m.mediaPending[key]
+    if ctx = invalid then return
+    m.mediaPending.Delete(key)
+    if ctx.op = "fetch" then
+        if ctx.lane = "kept" then
+            onKeptFetched(r, ctx)
+        else
+            onEntryFetched(r, ctx)
+        end if
+    else if ctx.op = "keptList" or ctx.op = "keptPrune" or ctx.op = "keptReset" then
+        onKeptListed(r, ctx)
+    end if
+end sub
+
+sub onStorage()
+    st = m.media.storage
+    if not Util.isAA(st) then return
+    m.storage = st
+    m.caps = computeCaps()
+    onStorageChanged()
+end sub
+
+' For the debug panel: the last calls, newest first. Paths only — no headers,
+' no bodies, never the token.
+sub logCall(method as string, path as string, r as object)
+    status = "ERR"
+    if r.network <> true then status = Str(r.status).Trim()
+    q = Instr(1, path, "?")
+    shown = path
+    if q > 0 then shown = Left(path, q - 1)
+    ms = Int(r.receivedAt - r.sentAt)
+    note = Util.strOr(r.code, "")
+    m.callLog.Unshift(Util.localHhmmss(Util.wallMs()) + " " + status + " " + method + " " + shown + " " + ms.ToStr() + "ms " + note)
+    if m.callLog.Count() > 14 then m.callLog.Pop()
+end sub
+
+' A wall runs for months: an unexpected answer must not take it down. The
+' error goes to state.error (the owner's dashboard shows it) and the debug
+' panel; playback carries on with what it has.
+sub noteFailure(where as string, e as object)
+    message = ""
+    if Util.isAA(e) then message = Util.strOr(e.message, "")
+    m.S.lastError = "internal (" + where + "): " + Left(message, 120)
+    m.internalFailures = Util.num(m.internalFailures) + 1
+end sub

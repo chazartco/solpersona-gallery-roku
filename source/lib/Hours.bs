@@ -1,0 +1,117 @@
+import "pkg:/source/lib/Util.bs"
+
+' Opening hours (SPEC §8 `schedule`) and ISO-8601 times (`expiresAt`,
+' `takeover.until`, `takeover.startedAt`).
+
+namespace Hours
+
+    ' "HH:MM" (24-hour) → minutes since midnight, or -1 when malformed.
+    function toMinutes(text as dynamic) as integer
+        if not Util.isString(text) or Len(text) <> 5 or Mid(text, 3, 1) <> ":" then return -1
+        hh = Mid(text, 1, 2)
+        mm = Mid(text, 4, 2)
+        if not Hours.isDigits(hh) or not Hours.isDigits(mm) then return -1
+        h = Val(hh)
+        mi = Val(mm)
+        if h > 23 or mi > 59 then return -1
+        return h * 60 + mi
+    end function
+
+    function isDigits(text as string) as boolean
+        for i = 1 to Len(text)
+            c = Asc(Mid(text, i, 1))
+            if c < 48 or c > 57 then return false
+        end for
+        return Len(text) > 0
+    end function
+
+    ' Is the screen within its opening hours at `minutes` past local midnight?
+    ' null: always on. on = off: always on. off < on spans midnight.
+    function isOpen(schedule as dynamic, minutes as integer) as boolean
+        if not Util.isAA(schedule) then return true
+        onAt = Hours.toMinutes(schedule["on"])
+        offAt = Hours.toMinutes(schedule["off"])
+        if onAt < 0 or offAt < 0 or onAt = offAt then return true
+        if onAt < offAt then return minutes >= onAt and minutes < offAt
+        return minutes >= onAt or minutes < offAt
+    end function
+
+end namespace
+
+namespace Iso
+
+    ' ISO-8601 → epoch milliseconds (Double), or invalid. Accepts
+    ' "2026-10-12T18:15:00Z", "…:00.000Z" and "…:00+02:00". Written out by hand
+    ' because roDateTime.FromISO8601String's handling of fractions and offsets
+    ' has varied between OS versions, and a takeover's `until` must be exact.
+    function toMs(text as dynamic) as dynamic
+        if not Util.isString(text) or Len(text) < 19 then return invalid
+        if Mid(text, 5, 1) <> "-" or Mid(text, 8, 1) <> "-" or Mid(text, 14, 1) <> ":" or Mid(text, 17, 1) <> ":" then return invalid
+        sep = UCase(Mid(text, 11, 1))
+        if sep <> "T" and sep <> " " then return invalid
+        parts = [Mid(text, 1, 4), Mid(text, 6, 2), Mid(text, 9, 2), Mid(text, 12, 2), Mid(text, 15, 2), Mid(text, 18, 2)]
+        for each p in parts
+            if not Hours.isDigits(p) then return invalid
+        end for
+        y = Val(parts[0])
+        mo = Val(parts[1])
+        d = Val(parts[2])
+        h = Val(parts[3])
+        mi = Val(parts[4])
+        s = Val(parts[5])
+        if mo < 1 or mo > 12 or d < 1 or d > 31 or h > 23 or mi > 59 or s > 60 then return invalid
+
+        rest = Mid(text, 20)
+        frac = 0#
+        if Left(rest, 1) = "." then
+            i = 2
+            digits = ""
+            while i <= Len(rest) and Hours.isDigits(Mid(rest, i, 1))
+                digits = digits + Mid(rest, i, 1)
+                i += 1
+            end while
+            if Len(digits) > 0 then
+                frac = Val(Left(digits + "000", 3)) + 0#
+            end if
+            rest = Mid(rest, i)
+        end if
+
+        zoneMs = 0#
+        if rest = "" or UCase(rest) = "Z" then
+            zoneMs = 0#
+        else if (Left(rest, 1) = "+" or Left(rest, 1) = "-") and Len(rest) >= 3 then
+            zh = Mid(rest, 2, 2)
+            zm = "00"
+            if Len(rest) >= 6 and Mid(rest, 4, 1) = ":" then zm = Mid(rest, 5, 2)
+            if Len(rest) = 5 then zm = Mid(rest, 4, 2)
+            if not Hours.isDigits(zh) or not Hours.isDigits(zm) then return invalid
+            zoneMs = (Val(zh) * 60 + Val(zm)) * 60000#
+            if Left(rest, 1) = "-" then zoneMs = -zoneMs
+        else
+            return invalid
+        end if
+
+        days = Iso.daysFromCivil(y, mo, d)
+        return ((((days * 24# + h) * 60# + mi) * 60# + s) * 1000# + frac) - zoneMs
+    end function
+
+    ' Days since 1970-01-01 for a proleptic Gregorian date (H. Hinnant).
+    function daysFromCivil(y as integer, mo as integer, d as integer) as double
+        if mo <= 2 then y = y - 1
+        if y >= 0 then
+            era = y \ 400
+        else
+            era = (y - 399) \ 400
+        end if
+        yoe = y - era * 400
+        if mo > 2 then
+            mp = mo - 3
+        else
+            mp = mo + 9
+        end if
+        doy = (153 * mp + 2) \ 5 + d - 1
+        doe = yoe * 365 + yoe \ 4 - yoe \ 100 + doy
+        return era * 146097# + doe - 719468
+    end function
+
+end namespace

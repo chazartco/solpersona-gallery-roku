@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  One full-screen layer of the wall: a piece with its fit (BLUR wash, FRAME,
+  BLACK, FILL), its wall label and its QR code. The scene keeps two and
+  cross-fades between them, as the simulator's layers A and B.
+
+  Set `spec` to build (invalid / {} clears). `ready` turns true once the
+  piece's picture has decoded (or `failed`), so the scene never fades up an
+  empty frame. A film is played by the scene's Video node, placed in
+  `videoSlot` at `pieceRect`, over the still drawn here.
+-->
+<component name="ArtLayer" extends="Group">
+    <interface>
+        <field id="spec" type="assocarray" onChange="onSpec" />
+        <field id="qrUri" type="string" onChange="onQr" />
+        <field id="captionShown" type="boolean" value="true" onChange="onCaption" />
+        <field id="burnOffset" type="vector2d" onChange="onBurn" />
+        <field id="ready" type="boolean" value="false" />
+        <field id="failed" type="boolean" value="false" />
+        <field id="pieceRect" type="assocarray" />
+        <field id="videoSlot" type="node" />
+    </interface>
+    <children>
+        <Rectangle id="black" width="1920" height="1080" color="0x000000FF" />
+        <Group id="back" />
+        <Poster id="piece" />
+        <Group id="slot" />
+        <Group id="corners" />
+        <Animation id="captionAnim" duration="1.2" easeFunction="linear">
+            <FloatFieldInterpolator id="captionInterp" key="[0.0, 1.0]" keyValue="[1.0, 0.0]" />
+        </Animation>
+        <Animation id="burnAnim" duration="4" easeFunction="inOutQuad">
+            <Vector2DFieldInterpolator id="burnInterp" key="[0.0, 1.0]" fieldToInterp="corners.translation" />
+        </Animation>
+    </children>
+</component>

@@ -1,0 +1,139 @@
+import "pkg:/source/lib/Util.bs"
+
+' Requests: { id, method, path, body (JSON text), auth (bool), toFile, timeoutMs }
+' Responses: { id, status, ok, data, code, message, retryAfterMs, network,
+'              sentAt, receivedAt (wall ms), file, link }
+'
+' `status` is the HTTP status, or 0 when no answer arrived (`network` true).
+
+sub init()
+    m.top.functionName = "runTask"
+end sub
+
+sub runTask()
+    port = CreateObject("roMessagePort")
+    m.top.ObserveField("request", port)
+    inflight = {}
+    while true
+        msg = Wait(250, port)
+        kind = type(msg)
+        if kind = "roSGNodeEvent" then
+            if msg.GetField() = "request" then
+                req = msg.GetData()
+                if Util.isAA(req) then startRequest(req, port, inflight)
+            end if
+        else if kind = "roUrlEvent" then
+            handleEvent(msg, inflight)
+        end if
+        expire(inflight)
+    end while
+end sub
+
+sub startRequest(req as object, port as object, inflight as object)
+    xfer = CreateObject("roUrlTransfer")
+    xfer.SetMessagePort(port)
+    base = Util.trimSlashes(m.top.baseUrl)
+    xfer.SetUrl(base + req.path)
+    if LCase(Left(base, 8)) = "https://" then
+        xfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
+        xfer.InitClientCertificates()
+    end if
+    xfer.RetainBodyOnError(true)
+    xfer.AddHeader("Accept", "application/json")
+    ' The credential goes only to the device API on the configured base URL (SPEC §2).
+    if req.auth = true and m.top.token <> "" then xfer.AddHeader("Authorization", "Bearer " + m.top.token)
+
+    method = UCase(Util.strOr(req.method, "GET"))
+    sentAt = Util.wallMs()
+    started = false
+    if Util.str(req.toFile) <> invalid then
+        started = xfer.AsyncGetToFile(req.toFile)
+    else if method = "GET" then
+        started = xfer.AsyncGetToString()
+    else
+        if method <> "POST" then xfer.SetRequest(method)
+        body = Util.strOr(req.body, "")
+        if body <> "" then xfer.AddHeader("Content-Type", "application/json")
+        started = xfer.AsyncPostFromString(body)
+    end if
+
+    timeout = 15000
+    if Util.isNumber(req.timeoutMs) then timeout = req.timeoutMs
+    if not started then
+        reply(req, { status: 0, network: true, sentAt: sentAt, receivedAt: Util.wallMs() })
+        return
+    end if
+    inflight[xfer.GetIdentity().ToStr()] = { xfer: xfer, req: req, sentAt: sentAt, deadline: sentAt + timeout }
+end sub
+
+sub handleEvent(msg as object, inflight as object)
+    key = msg.GetSourceIdentity().ToStr()
+    job = inflight[key]
+    if job = invalid or msg.GetInt() <> 1 then return
+    inflight.Delete(key)
+    receivedAt = Util.wallMs()
+    code = msg.GetResponseCode()
+    out = { status: code, sentAt: job.sentAt, receivedAt: receivedAt, network: code <= 0 }
+    if code <= 0 then
+        out.status = 0
+        reply(job.req, out)
+        return
+    end if
+    out.ok = code >= 200 and code < 300
+    headers = headersOf(msg)
+    if headers.DoesExist("retry-after") then
+        seconds = Val(headers["retry-after"])
+        if seconds > 0 then out.retryAfterMs = Int(seconds * 1000)
+    end if
+    if headers.DoesExist("x-qr-link") then out.link = headers["x-qr-link"]
+    if Util.str(job.req.toFile) <> invalid then
+        if out.ok then out.file = job.req.toFile
+    else
+        text = msg.GetString()
+        if text <> "" then
+            data = ParseJson(text)
+            if Util.isAA(data) then
+                out.data = data
+                if Util.isAA(data.error) then
+                    out.code = Util.strOr(data.error.code, "")
+                    out.message = Util.strOr(data.error.message, "")
+                end if
+            end if
+        end if
+    end if
+    if out.code = invalid then out.code = ""
+    reply(job.req, out)
+end sub
+
+' GetResponseHeaders() is empty on errors (and 429 is one), so the full array
+' is read instead; names are lower-cased for lookup.
+function headersOf(msg as object) as object
+    out = {}
+    list = msg.GetResponseHeadersArray()
+    if list = invalid then return out
+    for each pair in list
+        for each name in pair
+            out[LCase(name)] = pair[name]
+        end for
+    end for
+    return out
+end function
+
+sub expire(inflight as object)
+    now = Util.wallMs()
+    for each key in Util.keysOf(inflight)
+        job = inflight[key]
+        if now > job.deadline then
+            job.xfer.AsyncCancel()
+            inflight.Delete(key)
+            reply(job.req, { status: 0, network: true, timedOut: true, sentAt: job.sentAt, receivedAt: now })
+        end if
+    end for
+end sub
+
+sub reply(req as object, out as object)
+    out.id = req.id
+    if out.ok = invalid then out.ok = false
+    if out.code = invalid then out.code = ""
+    m.top.response = out
+end sub

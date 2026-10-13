@@ -1,0 +1,21 @@
+Copyright (c) 2026 SolPersona. All rights reserved.
+
+This repository is published so that the SolPersona Gallery channel for Roku
+can be read, reviewed and built. No licence to use, copy, modify, merge,
+publish, distribute, sublicense or sell the software is granted, except as
+needed to view it and to contribute changes back to this repository.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Third-party material
+--------------------
+
+fonts/  IBM Plex Serif, IBM Plex Sans and IBM Plex Mono, Copyright © 2017 IBM
+        Corp., with Reserved Font Name "Plex", licensed under the SIL Open Font
+        License 1.1 — see fonts/OFL.txt. The fonts are bundled unmodified.

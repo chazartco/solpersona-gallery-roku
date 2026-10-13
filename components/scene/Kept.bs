@@ -1,0 +1,268 @@
+' Kept on the device — keepOffline (SPEC §11a), simulator section 5b.
+'
+' When the owner switches on "Keep this gallery on the screen", sync answers
+' device.keepOffline: true and this downloads *every* piece of the show to the
+' USB stick or SD card (ext1:/solpersona/media/), two at a time, nearest-due
+' first, in whatever download slots the pieces due now leave free. The cache
+' reads kept files before the network, the playlist and clock are written to
+' the stick too, so a screen that restarts with no network plays its whole
+' show from the stick.
+'
+' Only where this model lets an app write to the stick (MediaTask probes it;
+' Roku documents USB as read-only, so many models will stream instead).
+
+sub initKept()
+    m.kept = {
+        on: false          ' keeping, as last answered by sync (or restored at boot)
+        files: {}          ' url → bytes, for everything on the stick
+        items: {}          ' itemId → { state, attempts, nextAt }: loading|stored|waiting|failed|room
+        running: 0         ' downloads in flight
+        reconciled: false  ' files{} has been read back from the stick
+        roomFull: false
+        error: invalid     ' what state.error says about keeping
+        prunedFor: invalid ' show id@version whose unused files were deleted
+        gen: 0             ' bumped on every reset, so a late download is thrown away
+        cleaned: false
+    }
+    m.wantKeep = false
+end sub
+
+function keptAvailable() as boolean
+    return m.storage.extWritable = true
+end function
+
+' The stick's file for a URL, when it holds one. Named exactly as MediaTask names it.
+function keptPathFor(url as string) as dynamic
+    if not m.kept.on or not m.kept.files.DoesExist(url) then return invalid
+    ext = Util.extensionOf(url)
+    if ext = "" then ext = "bin"
+    return m.storage.ext + "/solpersona/media/" + md5(url) + "." + ext
+end function
+
+' At start-up: a screen that was keeping its show goes on doing so — before any network.
+sub restoreKept()
+    if storeRead("kept") <> "1" or not keptAvailable() or m.kept.on then return
+    m.kept.on = true
+    reconcileKept()
+end sub
+
+' The storage probe arrived, or a stick went in or came out.
+sub onStorageChanged()
+    if m.mode <> "player" then return
+    if keptAvailable() then
+        if storeRead("kept") = "1" and not m.kept.on then
+            restoreKept()
+            if m.S.show = invalid then loadSnapshot()
+        else if m.wantKeep and not m.kept.on then
+            setKeepOffline(true)
+        end if
+    else if m.kept.on then
+        ' The stick was taken out: stream until it is back. The "kept" flag
+        ' stays, so the show resumes from the stick when it returns.
+        m.kept.on = false
+        m.kept.reconciled = false
+        m.kept.running = 0
+        m.kept.gen += 1
+    end if
+    syncNow() ' report the new capabilities
+end sub
+
+' Called with every sync answer.
+sub setKeepOffline(on as boolean)
+    m.wantKeep = on
+    if on then
+        if not keptAvailable() then
+            m.kept.error = "Insert a USB stick or SD card to keep this gallery on the screen"
+            if m.storage.ext <> invalid then m.kept.error = "This Roku cannot write to its USB stick or SD card; the gallery streams"
+            return
+        end if
+        if m.kept.on then return
+        m.kept.on = true
+        m.kept.items = {}
+        m.kept.prunedFor = invalid
+        m.kept.error = invalid
+        storeWrite("kept", "1")
+        reconcileKept()
+        saveSnapshot()
+        return
+    end if
+    ' Off: back to ordinary cache limits, room given back. Also once after
+    ' start-up, in case an earlier run left a store behind.
+    if m.kept.error <> invalid and Left(m.kept.error, 6) = "Insert" then m.kept.error = invalid
+    if m.kept.on or (not m.kept.cleaned and keptAvailable() and storeRead("kept") = "1") then dropKept()
+    m.kept.cleaned = true
+end sub
+
+sub dropKept()
+    m.kept.gen += 1
+    m.kept.on = false
+    m.kept.files = {}
+    m.kept.items = {}
+    m.kept.running = 0
+    m.kept.reconciled = false
+    m.kept.roomFull = false
+    m.kept.error = invalid
+    m.kept.prunedFor = invalid
+    storeDelete("kept")
+    if keptAvailable() then mediaSend("keptReset", {}, { gen: m.kept.gen })
+end sub
+
+' clear-cache while keeping: empty the stick, then fill it again.
+sub restartKept()
+    dropKept()
+    if m.mode = "player" then setKeepOffline(true)
+end sub
+
+sub reconcileKept()
+    m.kept.reconciled = false
+    mediaSend("keptList", {}, { gen: m.kept.gen })
+end sub
+
+sub onKeptListed(r as object, ctx as object)
+    if ctx.gen <> m.kept.gen or not m.kept.on then return
+    if Util.isAA(r.files) then m.kept.files = r.files
+    m.kept.reconciled = true
+    tick()
+end sub
+
+function keptCounts() as object
+    plan = Planner.keep(m.S, serverNow(), { screenWidth: m.caps.screenWidth, originals: m.caps.originals, vp9: m.vp9 = true })
+    stored = 0
+    for each p in plan
+        if Planner.keptHas(p, m.kept.files) then stored += 1
+    end for
+    return { stored: stored, total: plan.Count(), plan: plan }
+end function
+
+function keptMegabytes() as integer
+    total = 0#
+    if m.kept = invalid then return 0
+    for each url in m.kept.files
+        total += Util.num(m.kept.files[url])
+    end for
+    return Int(total / 1048576#)
+end function
+
+function keptBudgetBytes() as double
+    return m.caps.storageMb * 1048576#
+end function
+
+' Every tick, from manageCache. `displayLoading` is how many of the two slots
+' the pieces due now are using.
+sub pumpKept(displayLoading as integer)
+    if not m.kept.on or not m.kept.reconciled or m.mode <> "player" or m.S.show = invalid then return
+    counts = keptCounts()
+    pruneKept(counts.plan)
+    now = monoNow()
+    budget = keptBudgetBytes()
+    used = keptMegabytes() * 1048576#
+    m.kept.roomFull = used >= budget
+    for each id in m.kept.items
+        st = m.kept.items[id]
+        if st.state = "room" and st.nextAt > now then m.kept.roomFull = true
+    end for
+    for each p in counts.plan
+        if displayLoading + m.kept.running >= MAX_LOADING then exit for
+        if not Planner.keptHas(p, m.kept.files) then
+            st = m.kept.items[p.item.id]
+            if st = invalid or (st.state <> "loading" and st.nextAt <= now) then
+                ' Out of room: what is stored stays; the rest streams. On a show
+                ' that does not fit, the stored run starts where the wall was.
+                if used >= budget then
+                    m.kept.roomFull = true
+                    exit for
+                end if
+                storeItem(p)
+            end if
+        end if
+    end for
+    if m.kept.roomFull and counts.stored < counts.total then
+        m.kept.error = "Room for " + counts.stored.ToStr() + " of " + counts.total.ToStr() + " pieces"
+    else if m.kept.error <> invalid and Left(m.kept.error, 8) = "Room for" then
+        m.kept.error = invalid
+    end if
+end sub
+
+' A new show version: keep every file still in it, delete what is no longer used.
+sub pruneKept(plan as object)
+    sig = m.S.show.id + "@" + Str(m.S.show.version).Trim()
+    if m.kept.prunedFor = sig then return
+    m.kept.prunedFor = sig
+    wanted = []
+    inShow = {}
+    for each p in plan
+        inShow[p.item.id] = true
+        wanted.Append(p.urls)
+        if p.still <> invalid then wanted.Push(p.still)
+    end for
+    ' Failures are about the old files; a new version may carry new ones.
+    for each id in Util.keysOf(m.kept.items)
+        if not inShow.DoesExist(id) or m.kept.items[id].state <> "loading" then m.kept.items.Delete(id)
+    end for
+    m.kept.roomFull = false
+    mediaSend("keptPrune", { keep: wanted }, { gen: m.kept.gen })
+end sub
+
+' Stores one piece: the first of its files that will come, then (for a film) its still.
+sub storeItem(p as object)
+    id = p.item.id
+    st = m.kept.items[id]
+    if st = invalid then
+        st = { state: "queued", attempts: 0, nextAt: 0 }
+        m.kept.items[id] = st
+    end if
+    st.state = "loading"
+    m.kept.running += 1
+    keepNext({ gen: m.kept.gen, itemId: id, urls: p.urls, i: 0, still: p.still, lane: "kept" })
+end sub
+
+sub keepNext(ctx as object)
+    url = ctx.urls[ctx.i]
+    ctx.url = url
+    mediaSend("fetch", { url: url, lane: "kept" }, ctx)
+end sub
+
+sub onKeptFetched(r as object, ctx as object)
+    if ctx.gen <> m.kept.gen then return
+    if ctx.stillOnly = true then
+        if r.ok = true then m.kept.files[ctx.url] = Util.num(r.bytes)
+        return
+    end if
+    st = m.kept.items[ctx.itemId]
+    if st = invalid then
+        st = { state: "loading", attempts: 0, nextAt: 0 }
+        m.kept.items[ctx.itemId] = st
+    end if
+    now = monoNow()
+    if r.ok = true then
+        m.kept.files[ctx.url] = Util.num(r.bytes)
+        m.kept.running = Util.max(0, m.kept.running - 1)
+        st.state = "stored"
+        ' The wash and the poster, offline too (best effort).
+        if ctx.still <> invalid and not m.kept.files.DoesExist(ctx.still) then
+            mediaSend("fetch", { url: ctx.still, lane: "kept" }, { gen: ctx.gen, lane: "kept", stillOnly: true, url: ctx.still })
+        end if
+        saveSnapshot()
+        return
+    end if
+    if r.full <> true and r.network <> true and ctx.i + 1 < ctx.urls.Count() then
+        ' The next copy may live on a friendlier host.
+        ctx.i += 1
+        keepNext(ctx)
+        return
+    end if
+    m.kept.running = Util.max(0, m.kept.running - 1)
+    st.attempts += 1
+    if r.full = true then
+        m.kept.roomFull = true
+        st.state = "room"
+        st.nextAt = now + 600000
+    else
+        if r.network = true then st.state = "waiting" else st.state = "failed"
+        wait = 30000#
+        for i = 2 to st.attempts
+            wait = Util.min(600000, wait * 2)
+        end for
+        st.nextAt = now + wait
+    end if
+end sub

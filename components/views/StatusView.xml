@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  The calm full-screen states of a linked screen (SPEC §4.2, wording §11c):
+    mode "idle"        the time, "Ready", the screen's name, @owner — no QR
+    mode "connecting"  the same, while the first answer is awaited
+    mode "unlicensed"  "This screen isn't active on your account yet." and,
+                       smaller, where the owner manages screens. Nothing
+                       about buying, prices or plans.
+  The centre block drifts with the burn-in guard.
+-->
+<component name="StatusView" extends="Group">
+    <interface>
+        <field id="mode" type="string" value="idle" onChange="onChange" />
+        <field id="clock" type="string" onChange="onChange" />
+        <field id="name" type="string" onChange="onChange" />
+        <field id="owner" type="string" onChange="onChange" />
+        <field id="host" type="string" value="solpersona.com" onChange="onChange" />
+        <field id="burnOffset" type="vector2d" onChange="onBurn" />
+    </interface>
+    <children>
+        <Animation id="burnAnim" duration="4" easeFunction="inOutQuad">
+            <Vector2DFieldInterpolator id="burnInterp" key="[0.0, 1.0]" fieldToInterp="block.translation" />
+        </Animation>
+    </children>
+</component>

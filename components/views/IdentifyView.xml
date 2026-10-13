@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  The `identify` command (SPEC §7): the screen's name very large, over
+  everything, for ~6 s — "which one is which" on a wall of six.
+-->
+<component name="IdentifyView" extends="Group">
+    <interface>
+        <field id="name" type="string" onChange="onName" />
+        <field id="active" type="boolean" onChange="onActive" />
+    </interface>
+    <children>
+        <Rectangle width="1920" height="1080" color="0x000000B8" />
+        <Label id="who" width="1720" translation="[100, 0]" horizAlign="center" wrap="true" maxLines="2" color="0xECE9E3FF" />
+        <Label id="sub" width="1920" horizAlign="center" color="0x2B7FF5FF" text="THIS SCREEN" />
+        <Animation id="pulse" duration="1.5" repeat="true" easeFunction="inOutQuad">
+            <FloatFieldInterpolator key="[0.0, 0.5, 1.0]" keyValue="[1.0, 0.72, 1.0]" fieldToInterp="who.opacity" />
+        </Animation>
+    </children>
+</component>

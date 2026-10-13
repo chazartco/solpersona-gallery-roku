@@ -1,0 +1,55 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Geo.bs"
+import "pkg:/components/ui/Ui.bs"
+
+sub init()
+    m.size = { w: 0, h: 0 }
+    build()
+end sub
+
+sub build()
+    Ui.clear(m.top)
+    pad = Int(0.9 * Ui.UNIT)
+    padR = Int(1.4 * Ui.UNIT)
+    qr = Int(8 * Ui.UNIT)
+    shadow = Ui.makePoster(m.top, "pkg:/images/ui/shadow.9.png", -36, -30, 1, 1)
+    shadow.opacity = 0.3
+    bg = Ui.makePanel(m.top, 0, 0, 1, 1, "0x0E0D0CFF", 0.8, 12)
+    ring = Ui.makeRing(m.top, 0, 0, 1, 1, "0xFFFFFFFF", 0.08)
+    x = pad
+    if m.top.qrUri <> "" then
+        Ui.makePanel(m.top, pad, pad, qr, qr, "0xFFFFFFFF", 1.0, 6)
+        code = m.top.CreateChild("Poster")
+        inset = 4
+        code.translation = [pad + inset, pad + inset]
+        code.width = qr - 2 * inset
+        code.height = qr - 2 * inset
+        code.loadWidth = qr
+        code.loadHeight = qr
+        code.loadDisplayMode = "scaleToFit"
+        code.uri = m.top.qrUri
+        x = pad + qr + Int(1.3 * Ui.UNIT)
+    end if
+    k = Ui.makeLabel(m.top, Ui.SANS_BOLD, 14, Ui.ACCENT, "SAMPLE GALLERY", { x: x, y: pad + 4 })
+    text = "Link this screen — " + m.top.pairHost
+    if m.top.code <> "" then text = text + "  ·  " + m.top.code
+    t = Ui.makeLabel(m.top, Ui.SANS, 19, Ui.CARD_INK, text, { x: x, y: pad + 4 + Ui.sizeOf(k).h + 4 })
+    h2 = Ui.makeLabel(m.top, Ui.SANS, 15, "0xF3F0EA80", "Back returns to the pairing screen", { x: x, y: pad + 4 + Ui.sizeOf(k).h + 4 + Ui.sizeOf(t).h + 4 })
+    w = Int(x + Util.max(Ui.sizeOf(t).w, Ui.sizeOf(h2).w) + padR)
+    textH = 4 + Ui.sizeOf(k).h + 4 + Ui.sizeOf(t).h + 4 + Ui.sizeOf(h2).h
+    h = Int(2 * pad + Util.max(qr, textH))
+    if m.top.qrUri = "" then h = Int(2 * pad + textH)
+    bg.width = w
+    bg.height = h
+    ring.width = w
+    ring.height = h
+    shadow.width = w + 72
+    shadow.height = h + 72
+    m.size = { w: w, h: h }
+    place()
+end sub
+
+sub place()
+    at = Geo.cornerAt(m.top.corner, Ui.SCREEN_W, Ui.SCREEN_H, m.size.w, m.size.h)
+    m.top.translation = at
+end sub

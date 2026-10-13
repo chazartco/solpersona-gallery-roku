@@ -1,0 +1,156 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Clock.bs"
+import "pkg:/source/lib/Prefs.bs"
+import "pkg:/source/lib/MediaPick.bs"
+import "pkg:/source/lib/SyncLogic.bs"
+
+' What should be held, and in what order (SPEC §5.4, §6.5, §11a).
+
+namespace Planner
+
+    ' The current target by the clock: what should be on the wall right now.
+    ' A takeover wins over the show (whose clock keeps running underneath).
+    ' Returns invalid when nothing should be shown.
+    function target(S as object, nowServer as double) as dynamic
+        if S.status = "UNLICENSED" then return invalid
+        tk = SyncLogic.activeTakeover(S, nowServer)
+        if tk <> invalid then
+            started = nowServer
+            if tk.startedAtMs <> invalid then started = tk.startedAtMs
+            return {
+                key: "T|" + tk.item.id + "|" + tk.startedAt + "|" + Prefs.signature(tk.settings)
+                item: tk.item
+                settings: tk.settings
+                takeover: true
+                offsetMs: Util.max(0, nowServer - started)
+                slotMs: invalid
+                paused: false
+                estimated: false
+                index: invalid
+                lap: invalid
+            }
+        end if
+        show = S.show
+        if show = invalid or show.timeline.Count() = 0 then return invalid
+        position = Clock.positionAt(show.timeline, show, nowServer)
+        if position = invalid then return invalid
+        slot = show.timeline[position.index]
+        item = show.byId[slot.id]
+        if item = invalid then return invalid
+        return {
+            ' Keyed by the piece, not the index: a re-timed playlist that keeps
+            ' the same piece on the wall must not transition to itself.
+            key: "S|" + item.id + "|" + Prefs.signature(show.settings)
+            item: item
+            settings: show.settings
+            takeover: false
+            offsetMs: position.offsetMs
+            slotMs: slot.ms
+            estimated: slot.estimated = true
+            paused: Clock.isPaused(show)
+            index: position.index
+            lap: position.lap
+        }
+    end function
+
+    ' What to hold, most urgent first: { item, settings, role } with role
+    ' takeover | current | next | previous. The next `prefetch` pieces in
+    ' timeline order (wrapping) and the one before (SPEC §6.5).
+    function wanted(S as object, nowServer as double) as object
+        out = []
+        seen = {}
+        if S.status = "UNLICENSED" then return out
+        tk = SyncLogic.activeTakeover(S, nowServer)
+        if tk <> invalid then
+            out.Push({ item: tk.item, settings: tk.settings, role: "takeover" })
+            seen["T" + tk.item.id] = true
+        end if
+        show = S.show
+        if show = invalid or show.timeline.Count() = 0 then return out
+        position = Clock.positionAt(show.timeline, show, nowServer)
+        if position = invalid then return out
+        n = show.timeline.Count()
+        Planner.pushSlot(out, seen, show, position.index, "current")
+        ahead = Util.min(show.settings.prefetch, n - 1)
+        for i = 1 to ahead
+            Planner.pushSlot(out, seen, show, (position.index + i) mod n, "next")
+        end for
+        if n > 1 then Planner.pushSlot(out, seen, show, (position.index - 1 + n) mod n, "previous")
+        return out
+    end function
+
+    sub pushSlot(out as object, seen as object, show as object, index as integer, role as string)
+        item = show.byId[show.timeline[index].id]
+        if item = invalid or seen.DoesExist("S" + item.id) then return
+        seen["S" + item.id] = true
+        out.Push({ item: item, settings: show.settings, role: role })
+    end sub
+
+    ' Every piece of the show once, nearest-due first (timeline order from the
+    ' piece on the wall, wrapping), with the files that would do for it in the
+    ' order SPEC §6.2 prefers them; for a film, its still beside it (§11a).
+    function keep(S as object, nowServer as double, caps as object) as object
+        show = S.show
+        out = []
+        if show = invalid or show.timeline.Count() = 0 then return out
+        position = Clock.positionAt(show.timeline, show, nowServer)
+        start = 0
+        if position <> invalid then start = position.index
+        n = show.timeline.Count()
+        seen = {}
+        for i = 0 to n - 1
+            item = show.byId[show.timeline[(start + i) mod n].id]
+            if item <> invalid and not seen.DoesExist(item.id) then
+                seen[item.id] = true
+                still = invalid
+                urls = MediaPick.candidates(item, show.settings, caps)
+                if item.kind = "VIDEO" then
+                    still = MediaPick.stillOf(item)
+                    films = []
+                    for each url in urls
+                        if MediaPick.videoPlayable(url) or caps.vp9 = true then films.Push(url)
+                    end for
+                    urls = films
+                    ' A film this device cannot play shows its still: keep that.
+                    if urls.Count() = 0 then
+                        urls = MediaPick.videoStills(item)
+                        still = invalid
+                    end if
+                end if
+                out.Push({ item: item, urls: urls, still: still })
+            end if
+        end for
+        return out
+    end function
+
+    ' A piece counts as kept when any of its files is — so a quality change
+    ' that now prefers the original still plays the stored display copy.
+    function keptHas(entry as object, files as object) as boolean
+        for each url in entry.urls
+            if files.DoesExist(url) then return true
+        end for
+        return false
+    end function
+
+    ' Videos never cut off: when an *estimated* slot ends mid-play, the film
+    ' finishes before the next piece — unless the clock was moved (pause, next,
+    ' jump, a new show), which a person asked for and is followed at once. The
+    ' hold is capped at the film's length + 5 s (SPEC §6.3).
+    ' `cur` is { isVideo, playEnded, takeover, estimated, clockSig, holdSince, durationMs }.
+    function shouldHoldVideo(cur as object, wantedTarget as object, currentSig as string, nowLocal as double) as boolean
+        if not cur.isVideo or cur.playEnded or cur.takeover or wantedTarget.takeover then return false
+        if not cur.estimated or cur.clockSig <> currentSig then return false
+        if cur.holdSince = 0 then cur.holdSince = nowLocal
+        limit = 60000#
+        if Util.isNumber(cur.durationMs) and cur.durationMs > 0 then limit = cur.durationMs
+        return nowLocal - cur.holdSince < limit + 5000
+    end function
+
+    function clockSig(S as object) as string
+        if S.show = invalid then return ""
+        paused = "-"
+        if Util.isNumber(S.show.pausedAtMs) then paused = Util.intString(S.show.pausedAtMs)
+        return S.show.id + "|" + Util.intString(S.show.epochMs) + "|" + paused
+    end function
+
+end namespace

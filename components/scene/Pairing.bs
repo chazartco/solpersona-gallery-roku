@@ -1,0 +1,168 @@
+' Pairing (SPEC §3) — simulator section 8. Register, show the code, poll
+' /token until somebody links the screen on their phone, store the token
+' before anything else, then play. The rules live in PairLogic; this file
+' carries out its actions and paints the pairing screen.
+
+sub startPairing()
+    endSample()
+    m.mode = "pairing"
+    stopSync()
+    clearLayers()
+    clearCache(true)
+    clearQrCache()
+    m.S.show = invalid
+    m.S.takeover = invalid
+    m.S.status = invalid
+    m.target = invalid
+    m.blackout = false
+    m.views.blackout.visible = false
+    stopFilm()
+    showScreen("pairing")
+    m.pairRun += 1
+    m.P = PairLogic.create()
+    saved = invalid
+    raw = storeRead("pairing")
+    if raw <> "" then saved = ParseJson(raw)
+    if PairLogic.isReusable(saved, m.config.baseUrl, Util.wallMs()) then
+        saved.expiresAtMs = Iso.toMs(saved.expiresAt)
+        m.P.registration = saved
+        paintPairing()
+        schedulePair("token", PairLogic.intervalMs(m.P))
+    else
+        register()
+    end if
+end sub
+
+sub register()
+    m.P.registration = invalid
+    storeDelete("pairing")
+    paintPairing()
+    body = { platform: APP_PLATFORM, appVersion: m.appVersion, capabilities: m.caps }
+    if m.config.name <> "" then body.name = Left(m.config.name, 60)
+    apiSend("register", "POST", "/api/v1/device/register", FormatJson(body), false, { run: m.pairRun })
+end sub
+
+sub onRegisterResponse(r as object, ctx as object)
+    if ctx.run <> m.pairRun or (m.mode <> "pairing" and m.mode <> "sample") then return
+    runPairActions(PairLogic.onRegister(m.P, r, m.config.baseUrl))
+end sub
+
+sub onTokenResponse(r as object, ctx as object)
+    if ctx.run <> m.pairRun or (m.mode <> "pairing" and m.mode <> "sample") then return
+    runPairActions(PairLogic.onToken(m.P, r))
+end sub
+
+sub runPairActions(actions as object)
+    for each a in actions
+        if a.type = "linked" then
+            onLinked(a)
+            return
+        else if a.type = "savePairing" then
+            storeWrite("pairing", FormatJson(m.P.registration))
+            paintPairing()
+        else if a.type = "pollToken" then
+            schedulePair("token", a.ms)
+        else if a.type = "register" then
+            if a.ms <= 0 then
+                register()
+            else
+                paintPairing()
+                schedulePair("register", a.ms)
+            end if
+        end if
+    end for
+    paintPairing()
+end sub
+
+sub schedulePair(what as string, ms as integer)
+    m.pairNext = what
+    m.pairTimer.control = "stop"
+    m.pairTimer.duration = Util.max(0.05, ms / 1000.0)
+    m.pairTimer.control = "start"
+end sub
+
+sub onPairTimer()
+    if m.mode <> "pairing" and m.mode <> "sample" then return
+    if m.pairNext = "register" then
+        register()
+        return
+    end if
+    ' A code that has run out is replaced silently (SPEC §3.3 TOKEN_EXPIRED).
+    if PairLogic.isExpired(m.P, Util.wallMs()) then
+        register()
+        return
+    end if
+    apiSend("token", "POST", "/api/v1/device/token", FormatJson({ deviceCode: m.P.registration.deviceCode }), false, { run: m.pairRun })
+end sub
+
+' Given exactly once: on flash before anything else (SPEC §3.3).
+sub onLinked(a as object)
+    storeWrite("token", a.token)
+    storeWrite("tokenBase", m.config.baseUrl)
+    storeWrite("deviceId", a.deviceId)
+    storeWrite("ackSeq", "0")
+    storeDelete("pairing")
+    m.device = { token: a.token, deviceId: a.deviceId, baseUrl: m.config.baseUrl, ackSeq: 0 }
+    m.api.token = a.token
+    m.S = SyncLogic.create()
+    m.S.deviceInfo = { id: a.deviceId, name: a.name, owner: invalid, keepOffline: false }
+    startPlayer()
+end sub
+
+sub paintPairing()
+    view = m.views.pairing
+    reg = m.P.registration
+    if reg = invalid then
+        view.code = ""
+        view.qrUri = ""
+        view.pairHost = Util.hostOf(m.config.baseUrl) + "/pair"
+        view.pairUrl = ""
+        view.expiry = ""
+        view.deviceId = ""
+    else
+        view.code = Util.strOr(reg.pairingCode, "")
+        view.qrUri = pairingQrFile(reg)
+        pairUrl = Util.strOr(reg.pairUrl, "")
+        if pairUrl <> "" then
+            view.pairHost = Util.stripScheme(pairUrl)
+        else
+            view.pairHost = Util.hostOf(m.config.baseUrl) + "/pair"
+        end if
+        view.pairUrl = pairUrl
+        view.deviceId = Util.strOr(reg.deviceId, "")
+    end if
+    view.error = m.P.error
+    paintPairingCountdown()
+    paintSampleCard()
+end sub
+
+sub paintPairingCountdown()
+    if m.mode <> "pairing" and m.mode <> "sample" then return
+    reg = m.P.registration
+    if reg = invalid or reg.expiresAtMs = invalid then
+        m.views.pairing.expiry = ""
+        return
+    end if
+    remaining = reg.expiresAtMs - Util.wallMs()
+    if remaining > 0 then
+        m.views.pairing.expiry = "A new code in " + Util.fmtDuration(remaining)
+    else
+        m.views.pairing.expiry = "Getting a new code…"
+    end if
+end sub
+
+' The registration's ready-made QR (qrDataUri) as a file a Poster can show.
+' A new file name per code, so the texture cache never shows an old one.
+function pairingQrFile(reg as object) as string
+    uri = Util.strOr(reg.qrDataUri, "")
+    if uri = "" then return ""
+    name = "tmp:/pair-" + Util.strOr(reg.pairingCode, "code") + ".png"
+    if m.pairQrFile = name then return name
+    comma = Instr(1, uri, ",")
+    if comma = 0 then return ""
+    bytes = CreateObject("roByteArray")
+    bytes.FromBase64String(Mid(uri, comma + 1))
+    if bytes.Count() = 0 or not bytes.WriteFile(name) then return ""
+    m.pairQrFile = name
+    return name
+end function

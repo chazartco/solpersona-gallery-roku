@@ -1,0 +1,117 @@
+import "pkg:/source/lib/Util.bs"
+
+' Which file to show (SPEC §6.2, §6.3) and what this platform can decode.
+
+namespace MediaPick
+
+    ' The still to show, exactly as SPEC §6.2's table (test-vectors.json
+    ' "imageChoice"). `canHoldOriginal` is this device's own judgement of its
+    ' memory and decoder, the same value it reports as capabilities.originals.
+    function chooseStill(quality as string, screenWidth as integer, canHoldOriginal as boolean, original as dynamic, display as dynamic) as dynamic
+        o = Util.str(original)
+        d = Util.str(display)
+        if quality = "ORIGINAL" or (quality <> "DISPLAY" and screenWidth > 1280 and canHoldOriginal) then
+            if o <> invalid then return o
+            return d
+        end if
+        if d <> invalid then return d
+        return o
+    end function
+
+    ' Every file that would do for a piece, in the order to try them: the
+    ' chosen copy, the other copy, the fallback hosts, then the small poster.
+    ' For a video: the film, then its fallbacks (its still is handled apart).
+    ' `caps` is { screenWidth, originals }.
+    function candidates(item as object, settings as object, caps as object) as object
+        m = item.media
+        if not Util.isAA(m) then m = {}
+        fallbacks = []
+        if Util.isArray(m.fallbacks) then fallbacks = m.fallbacks
+        list = []
+        if item.kind = "VIDEO" then
+            list.Push(m.original)
+            list.Append(fallbacks)
+        else
+            first = MediaPick.chooseStill(settings.imageQuality, caps.screenWidth, caps.originals, m.original, m.display)
+            list.Push(first)
+            if first = Util.str(m.original) then list.Push(m.display) else list.Push(m.original)
+            list.Append(fallbacks)
+            list.Push(m.poster)
+        end if
+        return MediaPick.unique(list)
+    end function
+
+    ' A video's still: the BLUR wash, the poster under the film, and what is
+    ' shown instead of a film this platform cannot play (SPEC §6.3).
+    function stillOf(item as object) as dynamic
+        m = item.media
+        if not Util.isAA(m) then return invalid
+        d = Util.str(m.display)
+        if d <> invalid then return d
+        return Util.str(m.poster)
+    end function
+
+    ' Stills to try for a video, best first.
+    function videoStills(item as object) as object
+        m = item.media
+        if not Util.isAA(m) then return []
+        return MediaPick.unique([m.display, m.poster])
+    end function
+
+    function unique(list as object) as object
+        seen = {}
+        out = []
+        for each url in list
+            s = Util.str(url)
+            if s <> invalid and not seen.DoesExist(s) then
+                seen[s] = true
+                out.Push(s)
+            end if
+        end for
+        return out
+    end function
+
+    ' Formats known not to decode in a Roku Poster. Skipped without a download;
+    ' anything else is tried and falls through to the next candidate on failure.
+    function stillDecodable(url as string) as boolean
+        ext = Util.extensionOf(url)
+        return ext <> "avif" and ext <> "svg" and ext <> "heic" and ext <> "heif" and ext <> "tif" and ext <> "tiff"
+    end function
+
+    ' WebM/VP9 does not play in a Roku Video node, nor do the web-only
+    ' containers; their slot shows the still instead (SPEC §6.3).
+    function videoPlayable(url as dynamic) as boolean
+        s = Util.str(url)
+        if s = invalid then return false
+        ext = Util.extensionOf(s)
+        return ext <> "webm" and ext <> "ogv" and ext <> "ogg"
+    end function
+
+    ' The streamFormat a ContentNode needs for a film's URL.
+    function streamFormatOf(url as string) as string
+        ext = Util.extensionOf(url)
+        if ext = "m3u8" then return "hls"
+        if ext = "mpd" then return "dash"
+        if ext = "mkv" then return "mkv"
+        if ext = "mov" then return "mp4"
+        return "mp4"
+    end function
+
+    ' Where the QR code leads, for the debug panel (the server decides; §9).
+    function qrLinkFor(item as object, target as string) as dynamic
+        if target = "NONE" or not Util.isAA(item.links) then return invalid
+        l = item.links
+        if target = "VAULT" then
+            order = [l.vault, l.solpersona, l.marketplace]
+        else if target = "MARKETPLACE" then
+            order = [l.marketplace, l.solpersona, l.vault]
+        else
+            order = [l.solpersona, l.vault, l.marketplace]
+        end if
+        for each link in order
+            if Util.str(link) <> invalid then return link
+        end for
+        return invalid
+    end function
+
+end namespace

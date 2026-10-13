@@ -1,0 +1,129 @@
+' The debug overlay (SPEC §11): last sync and latency, clock offset, show
+' id/version, position, slot progress, cache, kept files, commands and the
+' recent API calls — the simulator's D panel, as text. Never the token.
+
+sub renderDebug()
+    if not m.config.debug then return
+    lines = []
+    now = serverNow()
+    S = m.S
+    lines.Push("CONNECTION")
+    lines.Push(kv("mode", m.mode))
+    lines.Push(kv("status", Util.strOr(S.status, "—")))
+    if S.online then
+        lines.Push(kv("online", "yes"))
+    else
+        lines.Push(kv("online", "no (" + S.failures.ToStr() + " failures)"))
+    end if
+    lines.Push(kv("base", m.config.baseUrl))
+    if m.device <> invalid then lines.Push(kv("device", m.device.deviceId))
+    if S.deviceInfo <> invalid then lines.Push(kv("name / owner", Util.strOr(S.deviceInfo.name, "") + " / @" + Util.strOr(S.deviceInfo.owner, "—")))
+    if S.clock.synced then
+        lines.Push(kv("clock offset", Util.intString(S.clock.offset) + " ms (rtt " + Util.intString(Util.num(S.clock.rtt)) + " ms)"))
+    else
+        lines.Push(kv("clock offset", "not synced"))
+    end if
+    lines.Push(kv("server now", Util.localHhmmss(now)))
+    if S.lastSyncAt <> invalid then lines.Push(kv("last sync", Util.intString((monoNow() - S.lastSyncAt) / 100) + "00 ms ago, " + Util.intString(Util.num(S.lastLatencyMs)) + " ms"))
+    if m.nextSyncAt <> invalid then lines.Push(kv("next sync", Util.intString(Util.max(0, m.nextSyncAt - monoNow())) + " ms"))
+    lines.Push(kv("screen", m.caps.screenWidth.ToStr() + "x" + m.caps.screenHeight.ToStr() + " originals " + boolText(m.caps.originals) + " vp9 " + boolText(m.vp9 = true)))
+    lines.Push(kv("error", Util.strOr(S.lastError, "—")))
+    if Util.num(m.internalFailures) > 0 then lines.Push(kv("caught", Util.intString(m.internalFailures) + " internal errors"))
+
+    show = S.show
+    if show <> invalid then
+        lines.Push("")
+        lines.Push("SHOW")
+        lines.Push(kv("id", show.id + " v" + Str(show.version).Trim()))
+        lines.Push(kv("pieces", show.items.Count().ToStr() + " · lap " + Util.fmtDuration(Clock.timelineLength(show.timeline))))
+        lines.Push(kv("fit", show.settings.fit + " / " + show.settings.transition + " " + show.settings.transitionMs.ToStr() + "ms"))
+        sched = "always"
+        if Util.isAA(show.settings.schedule) then sched = show.settings.schedule["on"] + "-" + show.settings.schedule["off"]
+        if m.blackout then sched = sched + " (closed)"
+        lines.Push(kv("schedule", sched))
+        if Clock.isPaused(show) then lines.Push(kv("paused", "yes"))
+    end if
+
+    t = m.target
+    if t <> invalid then
+        lines.Push("")
+        if t.takeover then lines.Push("TAKEOVER") else lines.Push("POSITION")
+        if t.index <> invalid then lines.Push(kv("index", Str(t.index).Trim() + " (lap " + Util.intString(t.lap) + ")"))
+        lines.Push(kv("item", t.item.id))
+        lines.Push(kv("title", Util.strOr(t.item.title, "—")))
+        slot = "∞"
+        if t.slotMs <> invalid then slot = Util.fmtDuration(t.slotMs)
+        lines.Push(kv("offset / slot", Util.fmtDuration(t.offsetMs) + " / " + slot))
+        if t.slotMs <> invalid and t.slotMs > 0 then lines.Push(kv("progress", bar(t.offsetMs / t.slotMs)))
+        cur = m.layers[m.front]
+        onWall = "—"
+        if cur.itemId <> invalid then
+            onWall = cur.itemId
+            if cur.key <> t.key then onWall = onWall + " (held)"
+        end if
+        lines.Push(kv("on screen", onWall))
+        lines.Push(kv("holding", Util.strOr(m.holding, "—")))
+        if m.filmLayer <> invalid then lines.Push(kv("video", m.film.state + " " + Str(Int(m.film.position)).Trim() + "/" + Str(Int(m.film.duration)).Trim() + " s mute " + boolText(m.film.mute)))
+    end if
+
+    lines.Push("")
+    lines.Push("CACHE " + m.cache.Count().ToStr() + " · " + countReady().ToStr() + " ready · " + bufferedAhead().ToStr() + " ahead")
+    n = 0
+    for each key in m.cache
+        e = m.cache[key]
+        detail = e.status
+        if e.status = "ready" then detail = "ready " + e.via + " " + e.w.ToStr() + "x" + e.h.ToStr() + " " + Util.extensionOf(e.url)
+        if e.stillFallback then detail = detail + " still"
+        if e.error <> invalid then detail = detail + " · " + e.error
+        lines.Push(kv(e.id, detail))
+        n += 1
+        if n >= 8 then exit for
+    end for
+    qr = []
+    for each key in m.qrCache
+        qr.Push(m.qrCache[key].state)
+    end for
+    if qr.Count() > 0 then lines.Push(kv("qr", qr.Join(" ")))
+
+    if m.mode = "player" then
+        lines.Push("")
+        if m.kept.on then
+            counts = keptCounts()
+            lines.Push("KEPT " + counts.stored.ToStr() + " of " + counts.total.ToStr() + " · " + keptMegabytes().ToStr() + " of " + m.caps.storageMb.ToStr() + " MB · " + m.kept.running.ToStr() + " downloading")
+            if m.kept.error <> invalid then lines.Push(kv("error", m.kept.error))
+        else
+            lines.Push(kv("kept", "off · " + storageText()))
+        end if
+    end if
+
+    lines.Push("")
+    lines.Push("COMMANDS ackSeq " + S.ackSeq.ToStr())
+    for each c in S.handledCommands
+        lines.Push(kv("#" + c.seq.ToStr(), c.type))
+    end for
+    if S.pendingDurations.Count() > 0 then lines.Push(kv("durations", Util.keysOf(S.pendingDurations).Join(" ")))
+
+    lines.Push("")
+    lines.Push("API")
+    lines.Append(m.callLog)
+    m.views.debug.text = lines.Join(Chr(10))
+end sub
+
+function kv(k as string, v as string) as string
+    pad = k
+    while Len(pad) < 14
+        pad = pad + " "
+    end while
+    if Len(v) > 46 then v = Left(v, 45) + "…"
+    return pad + v
+end function
+
+function boolText(b as boolean) as string
+    if b then return "yes"
+    return "no"
+end function
+
+function bar(fraction as double) as string
+    n = Int(Util.clamp(fraction, 0, 1) * 30)
+    return String(n, "█") + String(30 - n, "·")
+end function

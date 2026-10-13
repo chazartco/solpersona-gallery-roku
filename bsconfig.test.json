@@ -1,0 +1,30 @@
+{
+  "extends": "bsconfig.json",
+  "files": [
+    "manifest",
+    "source/**/*",
+    "components/**/*",
+    "images/**/*",
+    "fonts/**/*",
+    "media/**/*",
+    "tests/**/*.bs",
+    { "src": "docs/solpersona/test-vectors.json", "dest": "tests/test-vectors.json" }
+  ],
+  "stagingDir": "build/staging-tests",
+  "outFile": "build/solpersona-gallery-roku-tests.zip",
+  "plugins": ["@rokucommunity/bslint", "rooibos-roku"],
+  "rooibos": {
+    "isRecordingCodeCoverage": false,
+    "testsFilePattern": null,
+    "catchCrashes": true,
+    "lineWidth": 70,
+    "printTestTimes": false,
+    "keepAppOpen": true,
+    "showOnlyFailures": false,
+    "reporters": ["console"]
+  },
+  "diagnosticFilters": [
+    { "src": "node_modules/**/*" },
+    { "src": "tests/**/*", "codes": ["LINT1001", "LINT3010"] }
+  ]
+}

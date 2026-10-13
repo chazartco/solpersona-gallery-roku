@@ -1,0 +1,131 @@
+import "pkg:/source/lib/Util.bs"
+
+' Building blocks for the views. The UI is designed at 1920×1080 (manifest
+' ui_resolutions=fhd); SceneGraph scales it for HD devices. `U` is 1% of the
+' shorter side (UNIT), the simulator's unit, so proportions match the reference.
+'
+' SceneGraph has no rounded rectangles, box shadows or CSS gradients: panels
+' are white 9-patch images tinted with blendColor, shadows are a blurred
+' 9-patch, gradients are pre-rendered (tools/make-art.mjs).
+
+namespace Ui
+
+    const SCREEN_W = 1920
+    const SCREEN_H = 1080
+    const UNIT = 10.8
+
+    const ACCENT = "0x2B7FF5FF"
+    const INK = "0xECE9E3FF"
+    const INK_DIM = "0xECE9E39E"
+    const INK_FAINT = "0xECE9E361"
+    const CARD_INK = "0xF3F0EAFF"
+    const WARN = "0xF0A77AFF"
+
+    const SERIF = "pkg:/fonts/IBMPlexSerif-Regular.ttf"
+    const SERIF_ITALIC = "pkg:/fonts/IBMPlexSerif-Italic.ttf"
+    const SERIF_LIGHT = "pkg:/fonts/IBMPlexSerif-Light.ttf"
+    const MONO = "pkg:/fonts/IBMPlexMono-SemiBold.ttf"
+    const MONO_REGULAR = "pkg:/fonts/IBMPlexMono-Regular.ttf"
+    const SANS = "pkg:/fonts/IBMPlexSans-Regular.ttf"
+    const SANS_BOLD = "pkg:/fonts/IBMPlexSans-SemiBold.ttf"
+
+    function makeFont(uri as string, size as integer) as object
+        f = CreateObject("roSGNode", "Font")
+        f.uri = uri
+        f.size = size
+        return f
+    end function
+
+    ' A Label appended to `parent`. `opts`: { width, wrap, maxLines, align,
+    ' lineSpacing, x, y, opacity }.
+    function makeLabel(parent as object, fontUri as string, size as integer, color as string, text as string, opts = invalid as dynamic) as object
+        if opts = invalid then opts = {}
+        node = parent.CreateChild("Label")
+        node.font = Ui.makeFont(fontUri, size)
+        node.color = color
+        if opts.width <> invalid then node.width = opts.width
+        if opts.wrap = true then node.wrap = true
+        if opts.maxLines <> invalid then node.maxLines = opts.maxLines
+        if opts.align <> invalid then node.horizAlign = opts.align
+        if opts.lineSpacing <> invalid then node.lineSpacing = opts.lineSpacing
+        if opts.opacity <> invalid then node.opacity = opts.opacity
+        node.translation = [Util.num(opts.x), Util.num(opts.y)]
+        node.text = text
+        return node
+    end function
+
+    ' Width × height a Label takes up as laid out now.
+    function sizeOf(node as object) as object
+        r = node.BoundingRect()
+        return { w: r.width, h: r.height }
+    end function
+
+    function makeRect(parent as object, x as dynamic, y as dynamic, w as dynamic, h as dynamic, color as string, opacity = 1.0 as float) as object
+        node = parent.CreateChild("Rectangle")
+        node.translation = [x, y]
+        node.width = Util.max(0, w)
+        node.height = Util.max(0, h)
+        node.color = color
+        node.opacity = opacity
+        return node
+    end function
+
+    function makePoster(parent as object, uri as string, x as dynamic, y as dynamic, w as dynamic, h as dynamic) as object
+        node = parent.CreateChild("Poster")
+        node.translation = [x, y]
+        node.width = w
+        node.height = h
+        node.loadDisplayMode = "scaleToFill"
+        node.uri = uri
+        return node
+    end function
+
+    ' A rounded panel: a white 9-patch tinted to `color` (RRGGBB) at `opacity`.
+    ' radius: 6 | 12 | 22 (pill).
+    function makePanel(parent as object, x as dynamic, y as dynamic, w as dynamic, h as dynamic, color as string, opacity as float, radius = 6 as integer) as object
+        uri = "pkg:/images/ui/round6.9.png"
+        if radius >= 20 then
+            uri = "pkg:/images/ui/pill.9.png"
+        else if radius >= 10 then
+            uri = "pkg:/images/ui/round12.9.png"
+        end if
+        node = Ui.makePoster(parent, uri, x, y, w, h)
+        node.blendColor = color
+        node.opacity = opacity
+        return node
+    end function
+
+    ' A hairline around a panel (CSS `border: 1px solid rgba(255,255,255,a)`).
+    function makeRing(parent as object, x as dynamic, y as dynamic, w as dynamic, h as dynamic, color as string, opacity as float, pill = false as boolean) as object
+        uri = "pkg:/images/ui/ring6.9.png"
+        if pill then uri = "pkg:/images/ui/pill-ring.9.png"
+        node = Ui.makePoster(parent, uri, x, y, w, h)
+        node.blendColor = color
+        node.opacity = opacity
+        return node
+    end function
+
+    ' A soft drop shadow under the rectangle r ({x,y,w,h}), dropped by dy.
+    ' The 9-patch's falloff is 48 px on each side.
+    function makeShadow(parent as object, r as object, dy as dynamic, opacity as float) as object
+        pad = 48
+        node = Ui.makePoster(parent, "pkg:/images/ui/shadow.9.png", r.x - pad, r.y - pad + dy, r.w + 2 * pad, r.h + 2 * pad)
+        node.opacity = opacity
+        return node
+    end function
+
+    ' The SolPersona Gallery wordmark, top left of the full-screen states.
+    sub makeWordmark(parent as object)
+        dot = Ui.makePoster(parent, "pkg:/images/ui/dot.png", 49, 52, 9, 9)
+        dot.blendColor = Ui.ACCENT
+        a = Ui.makeLabel(parent, Ui.SERIF, 21, Ui.INK, "SolPersona", { x: 68, y: 41 })
+        Ui.makeLabel(parent, Ui.SERIF_ITALIC, 21, Ui.INK_DIM, "Gallery", { x: 68 + Ui.sizeOf(a).w + 7, y: 41 })
+    end sub
+
+    sub clear(node as object)
+        if node = invalid then return
+        n = node.GetChildCount()
+        if n > 0 then node.RemoveChildrenIndex(n, 0)
+    end sub
+
+end namespace

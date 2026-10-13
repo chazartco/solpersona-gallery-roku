@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  A small panel over the wall: a title, an optional sentence, optional
+  label/value rows, and buttons moved through with the remote. Used for the
+  OK overlay, "Leave the gallery?", "Forget this account?" and the hidden
+  developer menu.
+
+  buttons: [{ id, text, tone: "danger" | "" }]. OK sets `selected` to the
+  focused button's id; Back sets `cancelled`.
+-->
+<component name="Menu" extends="Group">
+    <interface>
+        <field id="title" type="string" />
+        <field id="body" type="string" />
+        <field id="rows" type="array" />
+        <field id="buttons" type="array" />
+        <field id="horizontal" type="boolean" value="false" />
+        <field id="panelWidth" type="integer" value="760" />
+        <field id="focusIndex" type="integer" value="0" onChange="paintFocus" />
+        <field id="build" type="boolean" alwaysNotify="true" onChange="onBuild" />
+        <field id="selected" type="string" alwaysNotify="true" />
+        <field id="cancelled" type="boolean" alwaysNotify="true" />
+    </interface>
+</component>

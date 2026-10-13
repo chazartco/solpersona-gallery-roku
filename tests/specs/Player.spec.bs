@@ -1,0 +1,255 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Clock.bs"
+import "pkg:/source/lib/Hours.bs"
+import "pkg:/source/lib/Prefs.bs"
+import "pkg:/source/lib/MediaPick.bs"
+import "pkg:/source/lib/SyncLogic.bs"
+import "pkg:/source/lib/PairLogic.bs"
+import "pkg:/source/lib/Planner.bs"
+import "pkg:/source/lib/Geo.bs"
+
+' What the player decides from the clock: the target, what to hold, keeping
+' the whole show, never cutting a video, and where things go on the wall.
+namespace tests
+
+    @SGNode("Group")
+    @suite("Player")
+    class PlayerTests extends rooibos.BaseTestSuite
+
+        @describe("settings")
+
+        @it("fills every key with its default")
+        function _()
+            s = Prefs.resolve({})
+            m.assertEqual(s.fit, "BLUR")
+            m.assertEqual(s.washOpacity, 60)
+            m.assertEqual(s.prefetch, 2)
+            m.assertEqual(s.qrCorner, "BOTTOM_RIGHT")
+            m.assertInvalid(s.schedule)
+        end function
+
+        @it("clamps out-of-range numbers and falls back on unknown enums")
+        function _()
+            s = Prefs.resolve({ washOpacity: 140, marginPercent: -3, prefetch: 99, transitionMs: 7000, fit: "SPARKLES", transition: "DISSOLVE", schedule: { "on": "18:00", "off": "02:00" }, extra: 1 })
+            m.assertEqual(s.washOpacity, 100)
+            m.assertEqual(s.marginPercent, 0)
+            m.assertEqual(s.prefetch, 10)
+            m.assertEqual(s.transitionMs, 5000)
+            m.assertEqual(s.fit, "BLUR")
+            m.assertEqual(s.transition, "DISSOLVE")
+            m.assertEqual(s.schedule["on"], "18:00")
+            m.assertFalse(s.DoesExist("extra"))
+        end function
+
+        @it("changes the signature only with presentation keys")
+        function _()
+            a = Prefs.resolve({ fit: "BLUR", slideSeconds: 30 })
+            b = Prefs.resolve({ fit: "BLUR", slideSeconds: 60 })
+            c = Prefs.resolve({ fit: "FRAME", slideSeconds: 30 })
+            m.assertEqual(Prefs.signature(a), Prefs.signature(b))
+            m.assertNotEqual(Prefs.signature(a), Prefs.signature(c))
+        end function
+
+        @describe("time")
+
+        @it("parses ISO-8601 with and without fractions and offsets")
+        function _()
+            m.assertEqual(Util.num(Iso.toMs("1970-01-01T00:00:00Z")), 0#)
+            m.assertEqual(Util.num(Iso.toMs("2026-10-12T18:15:00.000Z")), 1791828900000#)
+            m.assertEqual(Util.num(Iso.toMs("2026-10-12T18:15:00.25Z")), 1791828900250#)
+            m.assertEqual(Util.num(Iso.toMs("2026-10-12T20:15:00+02:00")), 1791828900000#)
+            m.assertEqual(Util.num(Iso.toMs("2024-02-29T12:00:00Z")), 1709208000000#)
+            m.assertInvalid(Iso.toMs("yesterday"))
+            m.assertInvalid(Iso.toMs(invalid))
+        end function
+
+        @it("floors large doubles")
+        function _()
+            m.assertEqual(Util.floor(1760290000000.9#), 1760290000000#)
+            m.assertEqual(Util.floor(-2.5#), -3#)
+            m.assertEqual(Util.floor(-5000000000.5#), -5000000001#)
+        end function
+
+        @describe("target")
+
+        @it("puts the clock's piece on the wall")
+        function _()
+            S = m.state()
+            t = Planner.target(S, 1000000# + 12500)
+            m.assertEqual(t.item.id, "b")
+            m.assertEqual(Util.num(t.offsetMs), 2500#)
+            m.assertFalse(t.takeover)
+            m.assertFalse(t.paused)
+        end function
+
+        @it("keys a target by piece and look, not by index")
+        function _()
+            S = m.state()
+            t1 = Planner.target(S, 1000000# + 12500)
+            S.show.timeline = [{ id: "b", ms: 10000 }, { id: "a", ms: 10000 }, { id: "c", ms: 5000 }]
+            S.show.epochMs = 1000000# + 10000
+            t2 = Planner.target(S, 1000000# + 12500)
+            m.assertEqual(t2.item.id, "b")
+            m.assertEqual(t1.key, t2.key, "a re-timed playlist does not transition to itself")
+            S.show.settings = Prefs.resolve({ fit: "FILL" })
+            m.assertNotEqual(Planner.target(S, 1000000# + 12500).key, t1.key, "a new look redraws")
+        end function
+
+        @it("shows a takeover over the show, and nothing while UNLICENSED")
+        function _()
+            S = m.state()
+            S.takeover = SyncLogic.takeoverOf({ item: { id: "x", kind: "IMAGE", media: {} }, settings: {}, startedAt: "1970-01-01T00:16:40Z", until: invalid })
+            t = Planner.target(S, 1000000# + 3000)
+            m.assertTrue(t.takeover)
+            m.assertEqual(t.item.id, "x")
+            m.assertEqual(Util.num(t.offsetMs), 3000#)
+            S.status = "UNLICENSED"
+            m.assertInvalid(Planner.target(S, 1000000# + 3000))
+        end function
+
+        @describe("holding")
+
+        @it("holds the piece on the wall, the next `prefetch`, and the previous")
+        function _()
+            S = m.state()
+            wanted = Planner.wanted(S, 1000000#)
+            roles = []
+            ids = []
+            for each w in wanted
+                roles.Push(w.role)
+                ids.Push(w.item.id)
+            end for
+            m.assertEqual(ids, ["a", "b", "c"])
+            m.assertEqual(roles, ["current", "next", "next"])
+            S.show.settings = Prefs.resolve({ prefetch: 1 })
+            ids = []
+            for each w in Planner.wanted(S, 1000000#)
+                ids.Push(w.item.id)
+            end for
+            m.assertEqual(ids, ["a", "b", "c"], "the previous piece (c, wrapping) is kept too")
+        end function
+
+        @it("plans to keep every piece once, nearest-due first")
+        function _()
+            S = m.state()
+            plan = Planner.keep(S, 1000000# + 12500, { screenWidth: 1920, originals: false })
+            ids = []
+            for each p in plan
+                ids.Push(p.item.id)
+            end for
+            m.assertEqual(ids, ["b", "c", "a"])
+            m.assertEqual(plan[0].urls[0], "https://m/b.webp")
+            m.assertTrue(Planner.keptHas(plan[0], { "https://m/b.jpg": 10 }), "any of its files will do")
+            m.assertFalse(Planner.keptHas(plan[1], { "https://m/b.jpg": 10 }))
+        end function
+
+        @it("keeps a film this device can play, and the still of one it cannot")
+        function _()
+            S = m.state()
+            S.show = SyncLogic.showOf({
+                id: "s", version: 1, epochMs: 0, pausedAtMs: invalid, settings: {}
+                items: [
+                    { id: "v1", kind: "VIDEO", media: { original: "https://m/f.mp4", display: "https://m/f.webp", poster: "https://m/f-p.webp", fallbacks: [] } }
+                    { id: "v2", kind: "VIDEO", media: { original: "https://m/g.webm", display: "https://m/g.webp", poster: invalid, fallbacks: [] } }
+                ]
+                timeline: [{ id: "v1", ms: 10000 }, { id: "v2", ms: 10000 }]
+            })
+            plan = Planner.keep(S, 0#, { screenWidth: 1920, originals: true, vp9: false })
+            m.assertEqual(plan[0].urls, ["https://m/f.mp4"])
+            m.assertEqual(plan[0].still, "https://m/f.webp")
+            m.assertEqual(plan[1].urls, ["https://m/g.webp"])
+            m.assertInvalid(plan[1].still)
+            plan = Planner.keep(S, 0#, { screenWidth: 1920, originals: true, vp9: true })
+            m.assertEqual(plan[1].urls, ["https://m/g.webm"], "a Roku that decodes VP9 keeps the film")
+        end function
+
+        @it("lets a video finish when its estimated slot ends, unless the clock was moved")
+        function _()
+            cur = { isVideo: true, playEnded: false, takeover: false, estimated: true, clockSig: "s|1|-", holdSince: 0, durationMs: 20000 }
+            target = { takeover: false }
+            m.assertTrue(Planner.shouldHoldVideo(cur, target, "s|1|-", 1000#))
+            m.assertTrue(Planner.shouldHoldVideo(cur, target, "s|1|-", 25999#))
+            m.assertFalse(Planner.shouldHoldVideo(cur, target, "s|1|-", 26000#), "capped at length + 5 s")
+            cur.holdSince = 0
+            m.assertFalse(Planner.shouldHoldVideo(cur, target, "s|2|-", 1000#), "a person moved the clock")
+            cur.estimated = false
+            m.assertFalse(Planner.shouldHoldVideo(cur, target, "s|1|-", 1000#), "a measured slot is exact")
+        end function
+
+        @describe("layout")
+
+        @it("contains a piece inside the margin")
+        function _()
+            g = Geo.arrange(1920, 1080, Prefs.resolve({ fit: "BLACK", marginPercent: 4 }), 1000, 1000)
+            ' u = 10.8, margin 43.2: a square 993 high, centred.
+            m.assertEqual(g.piece.h, 993)
+            m.assertEqual(g.piece.w, 993)
+            m.assertEqual(g.piece.x, 463)
+            m.assertInvalid(g.wash)
+        end function
+
+        @it("draws a mat and moulding around a framed piece")
+        function _()
+            g = Geo.arrange(1920, 1080, Prefs.resolve({ fit: "FRAME", marginPercent: 0, frameStyle: "OAK" }), 1600, 900)
+            m.assertNotInvalid(g.mat)
+            m.assertNotInvalid(g.moulding)
+            m.assertEqual(g.mat.x, g.piece.x - 43)
+            m.assertEqual(g.moulding.x, g.mat.x - 16)
+            m.assertTrue(g.moulding.y >= 0)
+            g = Geo.arrange(1920, 1080, Prefs.resolve({ fit: "FRAME", frameStyle: "NONE" }), 1600, 900)
+            m.assertInvalid(g.moulding, "mat only")
+        end function
+
+        @it("covers the screen under FILL and oversizes the BLUR wash")
+        function _()
+            g = Geo.arrange(1920, 1080, Prefs.resolve({ fit: "FILL", marginPercent: 20 }), 500, 2000)
+            m.assertEqual(g.piece, { x: 0, y: 0, w: 1920, h: 1080 })
+            m.assertTrue(g.fill)
+            g = Geo.arrange(1920, 1080, Prefs.resolve({ fit: "BLUR" }), 500, 2000)
+            m.assertEqual(g.wash.w, 2208)
+            m.assertEqual(g.wash.x, -144)
+        end function
+
+        @it("finds the sample card a free corner")
+        function _()
+            m.assertEqual(Geo.freeCorner(Prefs.resolve({ captionCorner: "TOP_RIGHT", qrCorner: "TOP_LEFT" })), "BOTTOM_RIGHT")
+            m.assertEqual(Geo.freeCorner(invalid), "TOP_RIGHT")
+        end function
+
+        @describe("offline plays")
+
+        @it("records one stretch per piece in server time and settles what was sent")
+        function _()
+            log = PlayLog.create()
+            PlayLog.record(log, "a", 1000#)
+            PlayLog.record(log, "a", 2000#)
+            PlayLog.record(log, "b", 3000#)
+            PlayLog.record(log, "b", 9000#)
+            sent = PlayLog.pending(log, 2000)
+            m.assertEqual(sent.Count(), 3, "a gap of 5 s or more starts a new stretch")
+            m.assertEqual(Util.num(sent[0].ms), 1000#)
+            PlayLog.settle(log, 2)
+            m.assertEqual(log.entries.Count(), 1)
+            m.assertEqual(log.entries[0].itemId, "b")
+        end function
+
+        @describe("helpers")
+
+        function state() as object
+            S = SyncLogic.create()
+            S.status = "PLAYING"
+            S.show = SyncLogic.showOf({
+                id: "s", version: 1, epochMs: 1000000, pausedAtMs: invalid, settings: {}
+                items: [m.item("a"), m.item("b"), m.item("c")]
+                timeline: [{ id: "a", ms: 10000 }, { id: "b", ms: 10000 }, { id: "c", ms: 5000 }]
+            })
+            return S
+        end function
+
+        function item(id as string) as object
+            return { id: id, kind: "IMAGE", title: id, media: { original: "https://m/" + id + ".jpg", display: "https://m/" + id + ".webp", poster: invalid, fallbacks: [] } }
+        end function
+
+    end class
+
+end namespace

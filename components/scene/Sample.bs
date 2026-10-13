@@ -1,0 +1,126 @@
+' Try a sample gallery (SPEC §11b) — simulator section 8b. From the pairing
+' screen (OK) the wall plays SolPersona's public sample show — no credential —
+' through exactly the same clock, cache and renderer as a real show. Pairing
+' keeps running: the code stays on the wall in a corner card, /token keeps
+' being polled, and the moment somebody links the screen their own gallery
+' takes over. Back returns to the full pairing screen. The sample is never
+' written to the playlist snapshot.
+
+sub startSample()
+    if m.mode <> "pairing" then return
+    m.sampleRun += 1
+    m.mode = "sample"
+    m.S.status = "PLAYING"
+    m.S.show = invalid
+    m.S.takeover = invalid
+    m.target = invalid
+    m.S.online = true
+    m.S.failures = 0
+    m.S.lastError = invalid
+    showScreen("")
+    paintSampleCard()
+    fetchSample()
+    tick()
+end sub
+
+sub fetchSample()
+    if m.mode <> "sample" then return
+    apiSend("sample", "GET", "/api/v1/device/sample", "", false, { run: m.sampleRun })
+end sub
+
+sub onSampleTimer()
+    fetchSample()
+end sub
+
+sub onSampleResponse(r as object, ctx as object)
+    if ctx.run <> m.sampleRun or m.mode <> "sample" then return
+    if r.ok and Util.isAA(r.data) and Util.isAA(r.data.show) then
+        Clock.addSample(m.S.clock, r.data.serverTime, r.sentAt, r.receivedAt)
+        m.S.online = true
+        m.S.failures = 0
+        m.S.lastSyncAt = monoNow()
+        ' Every answer is the whole show; the renderer keeps the piece on the
+        ' wall when it is still in it.
+        SyncLogic.applyShow(m.S, r.data.show)
+        every = 60000
+        if Util.isNumber(r.data.pollMs) and r.data.pollMs > 0 then every = Int(Util.max(5000, r.data.pollMs))
+        scheduleSample(every)
+        paintSampleCard()
+        tick()
+        return
+    end if
+    if m.S.show = invalid and r.network <> true and r.status <> 429 and r.status < 500 then
+        ' Nothing to show and the server says it has none: back, with a reason.
+        stopSample()
+        m.P.error = "The sample gallery is not available right now."
+        paintPairing()
+        return
+    end if
+    m.S.online = false
+    m.S.failures += 1
+    wait = SyncLogic.backoffMs(r, m.S.failures)
+    scheduleSample(wait)
+end sub
+
+sub scheduleSample(ms as integer)
+    m.nextSyncAt = monoNow() + ms
+    m.sampleTimer.control = "stop"
+    m.sampleTimer.duration = Util.max(0.05, ms / 1000.0)
+    m.sampleTimer.control = "start"
+end sub
+
+' Leaves the sample for the full pairing screen. The pairing loop never stopped.
+sub stopSample()
+    if m.mode <> "sample" then return
+    endSample()
+    m.mode = "pairing"
+    showScreen("pairing")
+    paintPairing()
+end sub
+
+' Tears the sample down (for the pairing screen, or for the person's own gallery).
+sub endSample()
+    if m.mode <> "sample" then return
+    m.sampleRun += 1
+    m.sampleTimer.control = "stop"
+    stopFilm()
+    clearLayers()
+    clearCache(true)
+    clearQrCache()
+    m.S.show = invalid
+    m.S.takeover = invalid
+    m.S.status = invalid
+    m.target = invalid
+    m.S.online = true
+    m.S.failures = 0
+    m.nextSyncAt = invalid
+    m.views.sampleCard.visible = false
+    setLoading(false)
+end sub
+
+' "Link this screen — solpersona.com/pair · ABCD-EFGH" and the small QR, in a
+' corner the show leaves free.
+sub paintSampleCard()
+    card = m.views.sampleCard
+    if m.mode <> "sample" then
+        card.visible = false
+        return
+    end if
+    reg = m.P.registration
+    host = Util.hostOf(m.config.baseUrl) + "/pair"
+    code = ""
+    qr = ""
+    if reg <> invalid then
+        if Util.str(reg.pairUrl) <> invalid then host = Util.stripScheme(reg.pairUrl)
+        code = Util.strOr(reg.pairingCode, "")
+        qr = pairingQrFile(reg)
+    end if
+    if card.pairHost <> host then card.pairHost = host
+    if card.code <> code then card.code = code
+    if card.qrUri <> qr then card.qrUri = qr
+    settings = invalid
+    if m.S.show <> invalid then settings = m.S.show.settings
+    corner = Geo.freeCorner(settings)
+    if card.corner <> corner then card.corner = corner
+    card.visible = true
+end sub

@@ -1,0 +1,254 @@
+' Small helpers shared by every scope (main, the scene, the tasks, the tests).
+' Pure: no nodes, no I/O beyond the clock readers at the bottom.
+
+namespace Util
+
+    ' Any JSON number as a Double. ParseJson hands back Integer, LongInteger,
+    ' Float or Double depending on the size of the number, and epoch
+    ' milliseconds (1.76e12) overflow a 32-bit Integer — so every time value is
+    ' carried as a Double from the moment it is read.
+    function num(value as dynamic, fallback = 0 as dynamic) as double
+        if Util.isNumber(value) then return value + 0#
+        return fallback + 0#
+    end function
+
+    function isNumber(value as dynamic) as boolean
+        t = LCase(type(value))
+        return t = "integer" or t = "rointeger" or t = "longinteger" or t = "rolonginteger" or t = "float" or t = "rofloat" or t = "double" or t = "rodouble" or t = "rointrinsicdouble"
+    end function
+
+    function isString(value as dynamic) as boolean
+        t = LCase(type(value))
+        return t = "string" or t = "rostring"
+    end function
+
+    function isAA(value as dynamic) as boolean
+        return LCase(type(value)) = "roassociativearray"
+    end function
+
+    function isArray(value as dynamic) as boolean
+        return LCase(type(value)) = "roarray"
+    end function
+
+    function isBool(value as dynamic) as boolean
+        t = LCase(type(value))
+        return t = "boolean" or t = "roboolean"
+    end function
+
+    ' A non-empty string, or invalid (JSON null, missing, "", or not a string).
+    function str(value as dynamic) as dynamic
+        if Util.isString(value) and Len(value) > 0 then return value
+        return invalid
+    end function
+
+    function strOr(value as dynamic, fallback as string) as string
+        s = Util.str(value)
+        if s = invalid then return fallback
+        return s
+    end function
+
+    function boolOr(value as dynamic, fallback as boolean) as boolean
+        if Util.isBool(value) then return value
+        return fallback
+    end function
+
+    ' floor() for Doubles of any size. Int() returns a 32-bit Integer, so a
+    ' large value is split in two before flooring.
+    function floor(x as double) as double
+        if x > -2147483000# and x < 2147483000# then return Int(x) + 0#
+        big = 1073741824#
+        hi = Util.floor(x / big)
+        rest = x - hi * big
+        return hi * big + Int(rest)
+    end function
+
+    function min(a as dynamic, b as dynamic) as dynamic
+        if a < b then return a
+        return b
+    end function
+
+    function max(a as dynamic, b as dynamic) as dynamic
+        if a > b then return a
+        return b
+    end function
+
+    function clamp(value as dynamic, lo as dynamic, hi as dynamic) as dynamic
+        if value < lo then return lo
+        if value > hi then return hi
+        return value
+    end function
+
+    ' A whole number of milliseconds as decimal digits, never in exponent form.
+    ' FormatJson and Str() print large Doubles as "1.76029e+12", which would
+    ' lose the milliseconds that `plays.startedAt` needs.
+    function intString(value as double) as string
+        v = Util.floor(value + 0.5#)
+        negative = v < 0
+        if negative then v = -v
+        if v < 2147483000# then
+            s = Int(v).ToStr()
+        else
+            million = 1000000#
+            hi = Util.floor(v / million)
+            lo = Int(v - hi * million)
+            loText = lo.ToStr()
+            while Len(loText) < 6
+                loText = "0" + loText
+            end while
+            s = Util.intString(hi) + loText
+        end if
+        if negative then return "-" + s
+        return s
+    end function
+
+    function pad2(n as integer) as string
+        if n < 10 then return "0" + n.ToStr()
+        return n.ToStr()
+    end function
+
+    ' m:ss for the debug panel and the pairing countdown.
+    function fmtDuration(ms as dynamic) as string
+        if not Util.isNumber(ms) then return "—"
+        s = Int(Util.max(0, ms) / 1000 + 0.5)
+        return (s \ 60).ToStr() + ":" + Util.pad2(s mod 60)
+    end function
+
+    ' "https://solpersona.com/pair?code=X" → "solpersona.com/pair"
+    function stripScheme(url as string) as string
+        out = url
+        q = Instr(1, out, "?")
+        if q > 0 then out = Left(out, q - 1)
+        if LCase(Left(out, 8)) = "https://" then return Mid(out, 9)
+        if LCase(Left(out, 7)) = "http://" then return Mid(out, 8)
+        return out
+    end function
+
+    ' "https://host:8080/path" → "host:8080"
+    function hostOf(url as string) as string
+        rest = Util.stripScheme(url)
+        slash = Instr(1, rest, "/")
+        if slash > 0 then return Left(rest, slash - 1)
+        return rest
+    end function
+
+    function trimSlashes(url as string) as string
+        out = url.Trim()
+        while Len(out) > 0 and Right(out, 1) = "/"
+            out = Left(out, Len(out) - 1)
+        end while
+        return out
+    end function
+
+    ' Lower-cased file extension of a URL's path ("" when none), for skipping
+    ' formats the platform cannot decode before downloading them.
+    function extensionOf(url as dynamic) as string
+        if not Util.isString(url) then return ""
+        path = url
+        q = Instr(1, path, "?")
+        if q > 0 then path = Left(path, q - 1)
+        h = Instr(1, path, "#")
+        if h > 0 then path = Left(path, h - 1)
+        slash = 0
+        i = Instr(1, path, "/")
+        while i > 0
+            slash = i
+            i = Instr(i + 1, path, "/")
+        end while
+        name = Mid(path, slash + 1)
+        dot = 0
+        i = Instr(1, name, ".")
+        while i > 0
+            dot = i
+            i = Instr(i + 1, name, ".")
+        end while
+        if dot = 0 then return ""
+        ext = LCase(Mid(name, dot + 1))
+        if Len(ext) > 5 then return ""
+        return ext
+    end function
+
+    ' Decimal digits → Double, exactly. Val() returns a single-precision Float
+    ' (or a 32-bit Integer), which would round epoch milliseconds; ParseJson
+    ' reads big integers as LongInteger.
+    function parseBig(text as dynamic) as dynamic
+        if not Util.isString(text) or text = "" then return invalid
+        value = ParseJson(text)
+        if not Util.isNumber(value) then return invalid
+        return value + 0#
+    end function
+
+    ' Percent-encodes a query value (RFC 3986 unreserved characters kept).
+    ' roUrlTransfer.Escape is not available on the render thread.
+    function urlEncode(text as string) as string
+        hexDigits = "0123456789ABCDEF"
+        out = ""
+        for i = 1 to Len(text)
+            c = Asc(Mid(text, i, 1))
+            if (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c = 45 or c = 46 or c = 95 or c = 126 then
+                out = out + Chr(c)
+            else
+                bytes = []
+                if c < &h80 then
+                    bytes.Push(c)
+                else if c < &h800 then
+                    bytes.Push(&hC0 or (c >> 6))
+                    bytes.Push(&h80 or (c and &h3F))
+                else
+                    bytes.Push(&hE0 or (c >> 12))
+                    bytes.Push(&h80 or ((c >> 6) and &h3F))
+                    bytes.Push(&h80 or (c and &h3F))
+                end if
+                for each b in bytes
+                    out = out + "%" + Mid(hexDigits, (b >> 4) + 1, 1) + Mid(hexDigits, (b and 15) + 1, 1)
+                end for
+            end if
+        end for
+        return out
+    end function
+
+    function keysOf(aa as object) as object
+        out = []
+        for each k in aa
+            out.Push(k)
+        end for
+        return out
+    end function
+
+    function arrayCopy(items as object) as object
+        out = []
+        if items <> invalid then out.Append(items)
+        return out
+    end function
+
+    ' --- Clocks ---------------------------------------------------------------
+
+    ' Wall-clock epoch milliseconds. Safe in any thread; every thread agrees.
+    function wallMs() as double
+        dt = CreateObject("roDateTime")
+        return dt.AsSeconds() * 1000# + dt.GetMilliseconds()
+    end function
+
+    ' Local time of day, in minutes since midnight, at an epoch instant. The
+    ' schedule is in the screen's own time zone (SPEC §8).
+    function localMinutesAt(epochMs as double) as integer
+        dt = CreateObject("roDateTime")
+        dt.FromSeconds(Int(epochMs / 1000#))
+        dt.ToLocalTime()
+        return dt.GetHours() * 60 + dt.GetMinutes()
+    end function
+
+    function localHhmm(epochMs as double) as string
+        dt = CreateObject("roDateTime")
+        dt.FromSeconds(Int(epochMs / 1000#))
+        dt.ToLocalTime()
+        return Util.pad2(dt.GetHours()) + ":" + Util.pad2(dt.GetMinutes())
+    end function
+
+    function localHhmmss(epochMs as double) as string
+        dt = CreateObject("roDateTime")
+        dt.FromSeconds(Int(epochMs / 1000#))
+        dt.ToLocalTime()
+        return Util.pad2(dt.GetHours()) + ":" + Util.pad2(dt.GetMinutes()) + ":" + Util.pad2(dt.GetSeconds())
+    end function
+
+end namespace

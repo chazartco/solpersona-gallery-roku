@@ -1,0 +1,155 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Hours.bs"
+import "pkg:/source/lib/PairLogic.bs"
+
+' Pairing (SPEC §3.3) against canned answers.
+namespace tests
+
+    @SGNode("Group")
+    @suite("Pairing")
+    class PairTests extends rooibos.BaseTestSuite
+
+        @describe("register")
+
+        @it("keeps the registration and starts polling at intervalMs")
+        function _()
+            P = PairLogic.create()
+            actions = PairLogic.onRegister(P, m.registered(), "https://solpersona.com")
+            m.assertEqual(actions[0].type, "savePairing")
+            m.assertEqual(actions[1].type, "pollToken")
+            m.assertEqual(actions[1].ms, 3000)
+            m.assertEqual(P.registration.pairingCode, "ABCD-EFGH")
+            m.assertEqual(Util.num(P.registration.expiresAtMs), Iso.toMs("2026-10-12T18:15:00.000Z"))
+        end function
+
+        @it("retries with backoff when SolPersona cannot be reached")
+        function _()
+            P = PairLogic.create()
+            a1 = PairLogic.onRegister(P, { status: 0, network: true }, "https://solpersona.com")
+            a2 = PairLogic.onRegister(P, { status: 0, network: true }, "https://solpersona.com")
+            m.assertEqual(a1[0].type, "register")
+            m.assertEqual(a1[0].ms, 2000)
+            m.assertEqual(a2[0].ms, 4000)
+            m.assertEqual(P.error, "Cannot reach solpersona.com. Retrying…")
+        end function
+
+        @it("waits Retry-After on 429")
+        function _()
+            P = PairLogic.create()
+            actions = PairLogic.onRegister(P, { status: 429, network: false, retryAfterMs: 42000 }, "https://solpersona.com")
+            m.assertEqual(actions[0].ms, 42000)
+        end function
+
+        @describe("token")
+
+        @it("keeps polling while PENDING")
+        function _()
+            P = m.withRegistration()
+            actions = PairLogic.onToken(P, { status: 202, network: false, data: { status: "PENDING" } })
+            m.assertEqual(actions[0].type, "pollToken")
+            m.assertEqual(actions[0].ms, 3000)
+        end function
+
+        @it("hands over the token exactly once when LINKED")
+        function _()
+            P = m.withRegistration()
+            actions = PairLogic.onToken(P, { status: 200, network: false, data: { status: "LINKED", accessToken: "sps_secret", device: { id: "dev1", name: "Front window" } } })
+            m.assertEqual(actions.Count(), 1)
+            m.assertEqual(actions[0].type, "linked")
+            m.assertEqual(actions[0].token, "sps_secret")
+            m.assertEqual(actions[0].deviceId, "dev1")
+            m.assertEqual(actions[0].name, "Front window")
+        end function
+
+        @it("falls back to the registration's deviceId")
+        function _()
+            P = m.withRegistration()
+            actions = PairLogic.onToken(P, { status: 200, network: false, data: { status: "LINKED", accessToken: "sps_x" } })
+            m.assertEqual(actions[0].deviceId, "6f0c")
+        end function
+
+        @it("registers again, silently, on 401 TOKEN_EXPIRED or SCREEN_NOT_LINKED")
+        function _()
+            for each code in ["TOKEN_EXPIRED", "SCREEN_NOT_LINKED"]
+                P = m.withRegistration()
+                actions = PairLogic.onToken(P, { status: 401, network: false, code: code })
+                m.assertEqual(actions[0].type, "register", code)
+                m.assertEqual(actions[0].ms, 0, code)
+                m.assertInvalid(P.registration, code)
+            end for
+        end function
+
+        @it("waits Retry-After on 429")
+        function _()
+            P = m.withRegistration()
+            actions = PairLogic.onToken(P, { status: 429, network: false, retryAfterMs: 9000 })
+            m.assertEqual(actions[0].type, "pollToken")
+            m.assertEqual(actions[0].ms, 9000)
+        end function
+
+        @it("keeps showing the code on network errors, backing off to at most 30 s")
+        function _()
+            P = m.withRegistration()
+            waits = []
+            for i = 1 to 6
+                waits.Push(PairLogic.onToken(P, { status: 0, network: true })[0].ms)
+            end for
+            m.assertEqual(waits, [3000, 6000, 12000, 24000, 30000, 30000])
+            m.assertNotInvalid(P.registration)
+            PairLogic.onToken(P, { status: 202, network: false })
+            m.assertEqual(P.tokenFailures, 0)
+        end function
+
+        @describe("codes")
+
+        @it("knows when a code has run out")
+        function _()
+            P = m.withRegistration()
+            expires = Iso.toMs("2026-10-12T18:15:00.000Z")
+            m.assertFalse(PairLogic.isExpired(P, expires - 1))
+            m.assertTrue(PairLogic.isExpired(P, expires))
+        end function
+
+        @it("reuses a saved code after a restart only with time left")
+        function _()
+            reg = m.registered().data
+            reg.baseUrl = "https://solpersona.com"
+            expires = Iso.toMs(reg.expiresAt)
+            m.assertTrue(PairLogic.isReusable(reg, "https://solpersona.com", expires - 60000))
+            m.assertFalse(PairLogic.isReusable(reg, "https://solpersona.com", expires - 10000))
+            m.assertFalse(PairLogic.isReusable(reg, "http://localhost:8080", expires - 60000))
+        end function
+
+        @it("splits the code for its accent dash")
+        function _()
+            m.assertEqual(PairLogic.codeParts("ABCD-EFGH"), ["ABCD", "EFGH"])
+            m.assertEqual(PairLogic.codeParts("ABCDEFGH"), ["ABCDEFGH", ""])
+        end function
+
+        @describe("helpers")
+
+        function registered() as object
+            return {
+                status: 201
+                network: false
+                data: {
+                    deviceId: "6f0c"
+                    deviceCode: "k3Jv"
+                    pairingCode: "ABCD-EFGH"
+                    pairUrl: "https://solpersona.com/pair?code=ABCD-EFGH"
+                    qrDataUri: "data:image/png;base64,iVBORw0KGgo="
+                    expiresAt: "2026-10-12T18:15:00.000Z"
+                    intervalMs: 3000
+                }
+            }
+        end function
+
+        function withRegistration() as object
+            P = PairLogic.create()
+            PairLogic.onRegister(P, m.registered(), "https://solpersona.com")
+            return P
+        end function
+
+    end class
+
+end namespace

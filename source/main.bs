@@ -1,0 +1,28 @@
+' SolPersona Gallery for Roku.
+'
+' main() only opens the screen and waits: everything else lives in
+' MainScene (render thread) and its Task nodes (network and files). The scene
+' sets `exitApp` when the person confirms "Leave the gallery?".
+
+sub Main(args as dynamic)
+    screen = CreateObject("roSGScreen")
+    port = CreateObject("roMessagePort")
+    screen.SetMessagePort(port)
+    scene = screen.CreateScene("MainScene")
+    screen.Show()
+    scene.ObserveField("exitApp", port)
+    if Util.isAA(args) then scene.launchArgs = args
+
+    while true
+        msg = Wait(0, port)
+        kind = type(msg)
+        if kind = "roSGScreenEvent" then
+            if msg.IsScreenClosed() then return
+        else if kind = "roSGNodeEvent" then
+            if msg.GetField() = "exitApp" and msg.GetData() = true then
+                screen.Close()
+                return
+            end if
+        end if
+    end while
+end sub

@@ -1,0 +1,359 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Clock.bs"
+import "pkg:/source/lib/Hours.bs"
+import "pkg:/source/lib/Prefs.bs"
+import "pkg:/source/lib/SyncLogic.bs"
+
+' The poll and commands against canned answers (CONFORMANCE.md §A): new
+' version vs same version, command de-duplication by seq, 401 → pairing,
+' 429 → Retry-After, offline → keep playing with backoff.
+namespace tests
+
+    @SGNode("Group")
+    @suite("Sync")
+    class SyncTests extends rooibos.BaseTestSuite
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("the request")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        @it("asks for the whole playlist when it holds none")
+        function _()
+            S = SyncLogic.create()
+            built = SyncLogic.buildBody(S, { appVersion: "1.0.0" })
+            m.assertInvalid(built.body.showId)
+            m.assertInvalid(built.body.version)
+            m.assertEqual(built.body.ackSeq, 0)
+            m.assertEqual(built.body.appVersion, "1.0.0")
+        end function
+
+        @it("names the show and version it holds")
+        function _()
+            S = SyncLogic.create()
+            SyncLogic.onResponse(S, m.answer(m.playing(5, true)), invalid, 1000#)
+            built = SyncLogic.buildBody(S, {})
+            m.assertEqual(built.body.showId, "show1")
+            m.assertEqual(built.body.version, 5)
+        end function
+
+        @it("keeps the protocol's camelCase keys in the JSON it sends")
+        function _()
+            S = SyncLogic.create()
+            SyncLogic.onResponse(S, m.answer(m.playing(5, true)), invalid, 0#)
+            built = SyncLogic.buildBody(S, { appVersion: "1.0.0", state: { itemId: "a:1", bufferedAhead: 1 }, capabilities: { screenWidth: 1920 } })
+            text = SyncLogic.encodeBody(built)
+            for each key in ["showId", "appVersion", "ackSeq", "itemId", "bufferedAhead", "screenWidth"]
+                m.assertTrue(Instr(1, text, Chr(34) + key + Chr(34)) > 0, key + " in " + text)
+            end for
+        end function
+
+        @it("sends measured durations, at most 50, and forgets them once answered")
+        function _()
+            S = SyncLogic.create()
+            for i = 1 to 60
+                S.pendingDurations["a:" + i.ToStr()] = 1000 + i
+            end for
+            built = SyncLogic.buildBody(S, {})
+            m.assertEqual(built.body.durations.Count(), 50)
+            SyncLogic.onResponse(S, m.answer(m.idle()), built, 1000#)
+            m.assertEqual(S.pendingDurations.Count(), 10)
+        end function
+
+        @it("reports a video's length once per show version")
+        function _()
+            S = SyncLogic.create()
+            SyncLogic.reportDuration(S, "a:v", 12.48)
+            SyncLogic.reportDuration(S, "a:v", 12.5)
+            m.assertEqual(S.pendingDurations["a:v"], 12480)
+            SyncLogic.onResponse(S, m.answer(m.playing(1, true)), invalid, 0#)
+            S.pendingDurations = {}
+            SyncLogic.reportDuration(S, "a:v", 12.48)
+            m.assertEqual(S.pendingDurations["a:v"], 12480, "a new version may re-time it, so it is reported again")
+        end function
+
+        @it("writes plays with every millisecond of startedAt")
+        function _()
+            S = SyncLogic.create()
+            built = SyncLogic.buildBody(S, { plays: [{ itemId: "a:1", startedAt: 1760289000123#, ms: 120000# }] })
+            text = SyncLogic.encodeBody(built)
+            m.assertTrue(Instr(1, text, Chr(34) + "startedAt" + Chr(34) + ":1760289000123,") > 0, text)
+            parsed = ParseJson(text)
+            m.assertNotInvalid(parsed, "valid JSON")
+            m.assertEqual(parsed.plays[0].itemId, "a:1")
+            m.assertEqual(Util.num(parsed.plays[0].ms), 120000#)
+        end function
+
+        @it("formats large whole numbers without an exponent")
+        function _()
+            m.assertEqual(Util.intString(1760290000000#), "1760290000000")
+            m.assertEqual(Util.intString(1760290000007.4#), "1760290000007")
+            m.assertEqual(Util.intString(42#), "42")
+            m.assertEqual(Util.intString(-1500#), "-1500")
+            m.assertEqual(Util.intString(1000000#), "1000000")
+            m.assertEqual(Util.intString(3000000005#), "3000000005")
+        end function
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("answers")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        @it("takes a new playlist atomically and corrects the clock")
+        function _()
+            S = SyncLogic.create()
+            out = SyncLogic.onResponse(S, m.answer(m.playing(4, true)), invalid, 5000#)
+            m.assertEqual(S.status, "PLAYING")
+            m.assertEqual(S.show.version, 4)
+            m.assertEqual(S.show.items.Count(), 2)
+            m.assertEqual(S.show.timeline.Count(), 2)
+            m.assertEqual(S.show.settings.fit, "FRAME")
+            m.assertNotInvalid(S.show.byId["a:2"])
+            m.assertEqual(out.nextMs, 3000)
+            m.assertTrue(m.hasAction(out.actions, "showChanged"))
+            ' serverTime 1760290000000 − midpoint(1000, 1100): the clock offset.
+            m.assertEqual(Util.num(S.clock.offset), 1760290000000# - 1050#)
+            m.assertEqual(S.deviceInfo.owner, "chaz")
+        end function
+
+        @it("keeps the held playlist when the same version comes without one, but follows a moved clock")
+        function _()
+            S = SyncLogic.create()
+            SyncLogic.onResponse(S, m.answer(m.playing(4, true)), invalid, 0#)
+            same = m.playing(4, false)
+            same.show.epochMs = 1760289005000#
+            out = SyncLogic.onResponse(S, m.answer(same), invalid, 0#)
+            m.assertEqual(S.show.items.Count(), 2, "items kept")
+            m.assertEqual(Util.num(S.show.epochMs), 1760289005000#)
+            change = m.findAction(out.actions, "showChanged")
+            m.assertNotInvalid(change)
+            m.assertFalse(change.playlist)
+            m.assertTrue(change.moved)
+        end function
+
+        @it("does nothing when nothing changed")
+        function _()
+            S = SyncLogic.create()
+            SyncLogic.onResponse(S, m.answer(m.playing(4, true)), invalid, 0#)
+            out = SyncLogic.onResponse(S, m.answer(m.playing(4, false)), invalid, 0#)
+            m.assertFalse(m.hasAction(out.actions, "showChanged"))
+        end function
+
+        @it("asks for the whole playlist when told of a show it does not hold")
+        function _()
+            S = SyncLogic.create()
+            out = SyncLogic.onResponse(S, m.answer(m.playing(9, false)), invalid, 0#)
+            m.assertInvalid(S.show)
+            m.assertTrue(S.forceFull)
+            m.assertEqual(out.nextMs, 50, "asks again at once")
+            built = SyncLogic.buildBody(S, {})
+            m.assertInvalid(built.body.showId)
+        end function
+
+        @it("drops the show when the answer has none")
+        function _()
+            S = SyncLogic.create()
+            SyncLogic.onResponse(S, m.answer(m.playing(4, true)), invalid, 0#)
+            out = SyncLogic.onResponse(S, m.answer(m.idle()), invalid, 0#)
+            m.assertInvalid(S.show)
+            m.assertEqual(S.status, "IDLE")
+            change = m.findAction(out.actions, "showChanged")
+            m.assertTrue(change.cleared)
+        end function
+
+        @it("plays nothing while UNLICENSED, even if a show is sent")
+        function _()
+            S = SyncLogic.create()
+            data = m.playing(4, true)
+            data.status = "UNLICENSED"
+            SyncLogic.onResponse(S, m.answer(data), invalid, 0#)
+            m.assertEqual(S.status, "UNLICENSED")
+            m.assertInvalid(S.show)
+        end function
+
+        @it("follows the server's pollMs, never faster than once a second")
+        function _()
+            S = SyncLogic.create()
+            data = m.idle()
+            data.pollMs = 5000
+            m.assertEqual(SyncLogic.onResponse(S, m.answer(data), invalid, 0#).nextMs, 5000)
+            data.pollMs = 10
+            m.assertEqual(SyncLogic.onResponse(S, m.answer(data), invalid, 0#).nextMs, 1000)
+        end function
+
+        @it("reads keepOffline from the device")
+        function _()
+            S = SyncLogic.create()
+            data = m.idle()
+            data.device.keepOffline = true
+            out = SyncLogic.onResponse(S, m.answer(data), invalid, 0#)
+            keep = m.findAction(out.actions, "keepOffline")
+            m.assertTrue(keep.on)
+            m.assertTrue(S.deviceInfo.keepOffline)
+        end function
+
+        @it("takes a takeover and lets it lapse at `until` by server time")
+        function _()
+            S = SyncLogic.create()
+            data = m.playing(4, true)
+            data.takeover = { item: m.item("a:9", "IMAGE"), settings: { fit: "FILL" }, startedAt: "2026-10-12T18:00:00.000Z", until: "2026-10-12T18:10:00.000Z" }
+            SyncLogic.onResponse(S, m.answer(data), invalid, 0#)
+            m.assertNotInvalid(S.takeover)
+            m.assertEqual(S.takeover.settings.fit, "FILL")
+            m.assertEqual(S.takeover.settings.marginPercent, 4, "every key resolved")
+            started = Iso.toMs("2026-10-12T18:00:00.000Z")
+            m.assertNotInvalid(SyncLogic.activeTakeover(S, started + 60000))
+            m.assertInvalid(SyncLogic.activeTakeover(S, started + 600000))
+        end function
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("errors")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        @it("goes back to pairing on 401 SCREEN_NOT_LINKED")
+        function _()
+            S = SyncLogic.create()
+            out = SyncLogic.onResponse(S, { status: 401, ok: false, code: "SCREEN_NOT_LINKED", data: invalid, network: false }, invalid, 0#)
+            m.assertTrue(m.hasAction(out.actions, "unlink"))
+            m.assertInvalid(out.nextMs, "stops polling")
+        end function
+
+        @it("goes back to pairing on 401 UNAUTHENTICATED")
+        function _()
+            S = SyncLogic.create()
+            out = SyncLogic.onResponse(S, { status: 401, ok: false, code: "UNAUTHENTICATED", data: invalid, network: false }, invalid, 0#)
+            m.assertTrue(m.hasAction(out.actions, "unlink"))
+        end function
+
+        @it("honours Retry-After on 429")
+        function _()
+            S = SyncLogic.create()
+            out = SyncLogic.onResponse(S, { status: 429, ok: false, code: "RATE_LIMITED", data: invalid, network: false, retryAfterMs: 7000 }, invalid, 0#)
+            m.assertEqual(out.nextMs, 7000)
+            m.assertFalse(S.online)
+            out = SyncLogic.onResponse(S, { status: 429, ok: false, code: "RATE_LIMITED", data: invalid, network: false }, invalid, 0#)
+            m.assertEqual(out.nextMs, 15000, "no header: 15 s")
+        end function
+
+        @it("keeps the show and backs off 3 → 6 → 12 … 60 s while offline")
+        function _()
+            S = SyncLogic.create()
+            SyncLogic.onResponse(S, m.answer(m.playing(4, true)), invalid, 0#)
+            offline = { status: 0, ok: false, code: "", data: invalid, network: true }
+            waits = []
+            for i = 1 to 7
+                waits.Push(SyncLogic.onResponse(S, offline, invalid, 0#).nextMs)
+            end for
+            m.assertEqual(waits, [3000, 6000, 12000, 24000, 48000, 60000, 60000])
+            m.assertNotInvalid(S.show, "never blank the wall because the network blinked")
+            m.assertEqual(S.lastError, "offline")
+            SyncLogic.onResponse(S, m.answer(m.playing(4, false)), invalid, 0#)
+            m.assertTrue(S.online)
+            m.assertEqual(S.failures, 0)
+            m.assertInvalid(S.lastError)
+        end function
+
+        @it("treats a 5xx like no network")
+        function _()
+            S = SyncLogic.create()
+            out = SyncLogic.onResponse(S, { status: 503, ok: false, code: "", data: invalid, network: false }, invalid, 0#)
+            m.assertEqual(out.nextMs, 3000)
+            m.assertEqual(S.lastError, "HTTP 503")
+        end function
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("commands")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        @it("carries out each command once, in seq order, and acknowledges the highest")
+        function _()
+            S = SyncLogic.create()
+            data = m.idle()
+            data.commands = [{ seq: 9, type: "reload" }, { seq: 8, type: "identify" }]
+            out = SyncLogic.onResponse(S, m.answer(data), invalid, 1000#)
+            m.assertEqual(S.ackSeq, 9)
+            m.assertEqual(Util.num(S.identifyUntil), 7000#)
+            m.assertTrue(m.hasAction(out.actions, "identify"))
+            m.assertTrue(m.hasAction(out.actions, "reload"))
+            m.assertEqual(m.findAction(out.actions, "saveAck").ackSeq, 9)
+            m.assertEqual(out.nextMs, 50, "acknowledges promptly")
+
+            ' The same commands again (the ack has not landed yet): nothing happens twice.
+            out = SyncLogic.onResponse(S, m.answer(data), invalid, 2000#)
+            m.assertFalse(m.hasAction(out.actions, "identify"))
+            m.assertFalse(m.hasAction(out.actions, "reload"))
+            m.assertEqual(SyncLogic.buildBody(S, {}).body.ackSeq, 9)
+        end function
+
+        @it("acknowledges unknown command types without acting")
+        function _()
+            S = SyncLogic.create()
+            data = m.idle()
+            data.commands = [{ seq: 3, type: "dance" }]
+            out = SyncLogic.onResponse(S, m.answer(data), invalid, 0#)
+            m.assertEqual(S.ackSeq, 3)
+            m.assertFalse(m.hasAction(out.actions, "identify"))
+            m.assertTrue(m.hasAction(out.actions, "saveAck"))
+        end function
+
+        @it("reload drops the playlist and asks for it again; clear-cache asks the scene to clear")
+        function _()
+            S = SyncLogic.create()
+            SyncLogic.onResponse(S, m.answer(m.playing(4, true)), invalid, 0#)
+            data = m.playing(4, false)
+            data.commands = [{ seq: 1, type: "reload" }, { seq: 2, type: "clear-cache" }]
+            out = SyncLogic.onResponse(S, m.answer(data), invalid, 0#)
+            m.assertInvalid(S.show)
+            m.assertTrue(S.forceFull)
+            m.assertTrue(m.hasAction(out.actions, "clearCache"))
+            m.assertInvalid(SyncLogic.buildBody(S, {}).body.version)
+        end function
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("helpers")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        function answer(data as object) as object
+            return { status: 200, ok: true, code: "", data: data, network: false, sentAt: 1000#, receivedAt: 1100# }
+        end function
+
+        function idle() as object
+            return {
+                serverTime: 1760290000000&
+                pollMs: 3000
+                device: { id: "dev1", name: "Front window", owner: "chaz", keepOffline: false }
+                status: "IDLE"
+                show: invalid
+                takeover: invalid
+                commands: []
+            }
+        end function
+
+        function playing(version as integer, withPlaylist as boolean) as object
+            data = m.idle()
+            data.status = "PLAYING"
+            data.show = { id: "show1", version: version, sourceRef: "collection:x", epochMs: 1760289000000&, pausedAtMs: invalid }
+            if withPlaylist then
+                data.show.settings = { fit: "FRAME", slideSeconds: 30 }
+                data.show.items = [m.item("a:1", "IMAGE"), m.item("a:2", "VIDEO")]
+                data.show.timeline = [{ id: "a:1", ms: 30000 }, { id: "a:2", ms: 21000, estimated: true }]
+            end if
+            return data
+        end function
+
+        function item(id as string, kind as string) as object
+            return { id: id, kind: kind, title: "T " + id, artist: { name: "A", handle: invalid }, year: 2024, description: invalid, media: { original: "https://m/" + id + ".jpg", display: "https://m/" + id + ".webp", poster: invalid, fallbacks: [] }, links: { solpersona: "https://solpersona.com/x", vault: invalid, marketplace: invalid } }
+        end function
+
+        function findAction(actions as object, kind as string) as dynamic
+            for each a in actions
+                if a.type = kind then return a
+            end for
+            return invalid
+        end function
+
+        function hasAction(actions as object, kind as string) as boolean
+            return m.findAction(actions, kind) <> invalid
+        end function
+
+    end class
+
+end namespace

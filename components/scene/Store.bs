@@ -1,0 +1,34 @@
+' The registry section "solpersona": the screen's private storage on the Roku.
+'
+' Keys: token, tokenBase, deviceId, ackSeq, pairing (an unexpired
+' registration), snapshot (the last playlist and clock), kept ("1" while the
+' gallery is kept on the device), baseUrl, name, debug, keepAwake.
+'
+' Every write is flushed at once: the access token is handed over exactly
+' once (SPEC §3.3), so it must be on flash before anything else happens. The
+' token is never printed — there are no print statements in this app.
+
+function storeSection() as object
+    if m.storeSection = invalid then m.storeSection = CreateObject("roRegistrySection", "solpersona")
+    return m.storeSection
+end function
+
+function storeRead(key as string) as string
+    sec = storeSection()
+    if sec.Exists(key) then return sec.Read(key)
+    return ""
+end function
+
+sub storeWrite(key as string, value as string)
+    sec = storeSection()
+    sec.Write(key, value)
+    sec.Flush()
+end sub
+
+sub storeDelete(key as string)
+    sec = storeSection()
+    if sec.Exists(key) then
+        sec.Delete(key)
+        sec.Flush()
+    end if
+end sub

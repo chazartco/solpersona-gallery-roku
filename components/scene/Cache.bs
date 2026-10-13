@@ -1,0 +1,385 @@
+' Cache and prefetch (SPEC §6.5) — simulator section 5.
+'
+' An entry is one piece with the files chosen for it (a quality change is a
+' different entry). It moves queued → fetching → fetched → decoding → ready:
+'   fetching  MediaTask downloads the file to cachefs:/ (or finds it kept on
+'             the stick, or already cached)
+'   decoding  a hidden Poster decodes it at screen size — never the original's
+'             full size (Roku texture memory is small) — which proves the
+'             format decodes here and gives the picture's shape
+' A file that downloads but will not decode (a WebP on an old OS, an AVIF)
+' falls through to the next candidate: the other copy, the fallbacks, the poster.
+'
+' Held: the piece on the wall, the next `prefetch` (files on disk), the one
+' before. Only the piece on the wall and the one due next are probe-decoded,
+' and a probe lets its texture go once measured. At most two downloads at
+' once, most urgent first.
+
+const MAX_LOADING = 2
+
+sub initCache()
+    m.cache = {}
+    m.decoders = m.top.FindNode("decoders")
+    m.decoderKeys = {}
+    m.decoderSeq = 0
+    m.qrCache = {}
+    m.qrGen = 0
+    m.digest = CreateObject("roEVPDigest")
+    m.badUrls = {}
+    m.pinnedUrls = []
+    m.pinnedSent = ""
+    m.holding = invalid
+end sub
+
+function md5(text as string) as string
+    ba = CreateObject("roByteArray")
+    ba.FromAsciiString(text)
+    m.digest.Setup("md5")
+    return m.digest.Process(ba)
+end function
+
+function entryKeyFor(item as object, settings as object) as string
+    return item.id + "#" + md5(MediaPick.candidates(item, settings, m.caps).Join(Chr(10)))
+end function
+
+function ensureEntry(item as object, settings as object) as object
+    key = entryKeyFor(item, settings)
+    e = m.cache[key]
+    if e <> invalid then
+        if e.status = "error" and monoNow() - e.failedAt > 60000 then
+            ' Try again a minute later, from the top.
+            e.status = "queued"
+            e.ci = 0
+            e.error = invalid
+        end if
+        return e
+    end if
+    candidates = MediaPick.candidates(item, settings, m.caps)
+    e = {
+        key: key, id: item.id, item: item, kind: item.kind
+        stills: [], filmUrls: [], ci: 0, status: "queued"
+        file: "", url: "", via: "", bytes: 0, w: 0, h: 0
+        error: invalid, failedAt: 0, decoder: invalid
+        stillFallback: false, durationMs: invalid, keptFilmFailed: false
+    }
+    if item.kind = "VIDEO" then
+        for each url in candidates
+            if MediaPick.videoPlayable(url) or m.vp9 = true then e.filmUrls.Push(url)
+        end for
+        e.stills = decodable(MediaPick.videoStills(item))
+        ' A film this Roku cannot play shows its still for the slot (SPEC §6.3).
+        if e.filmUrls.Count() = 0 then e.stillFallback = true
+    else
+        e.stills = decodable(candidates)
+    end if
+    m.cache[key] = e
+    return e
+end function
+
+function decodable(urls as object) as object
+    out = []
+    for each url in urls
+        if MediaPick.stillDecodable(url) then out.Push(url)
+    end for
+    return out
+end function
+
+' Moves one entry along as far as it can go now.
+sub advance(e as object, needDecode as boolean, slots as object)
+    while e.status = "queued"
+        if e.ci >= e.stills.Count() then
+            if e.kind = "VIDEO" and e.filmUrls.Count() > 0 and not e.stillFallback then
+                ' A film with no usable still still plays; the Video node fills the box.
+                e.status = "ready"
+                e.w = 1920
+                e.h = 1080
+                e.file = ""
+            else
+                failEntry(e)
+            end if
+            return
+        end if
+        url = e.stills[e.ci]
+        if m.badUrls.DoesExist(url) then
+            e.ci += 1
+        else
+            kept = keptPathFor(url)
+            if kept <> invalid then
+                e.url = url
+                e.file = kept
+                e.via = "kept"
+                e.status = "fetched"
+            else if slots.free > 0 then
+                slots.free -= 1
+                e.url = url
+                e.status = "fetching"
+                mediaSend("fetch", { url: url, lane: "cache" }, { lane: "cache", key: e.key, url: url })
+            else
+                return
+            end if
+        end if
+    end while
+    if e.status = "fetched" and needDecode then startDecode(e)
+end sub
+
+sub onEntryFetched(r as object, ctx as object)
+    e = m.cache[ctx.key]
+    if e = invalid or e.status <> "fetching" or e.url <> ctx.url then return
+    if r.ok = true then
+        e.file = r.path
+        e.bytes = Util.num(r.bytes)
+        if r.cached = true then e.via = "cache" else e.via = "network"
+        e.status = "fetched"
+    else
+        if r.network = true then
+            e.error = "network"
+        else
+            e.error = "HTTP " + Str(r.status).Trim()
+        end if
+        e.ci += 1
+        e.status = "queued"
+    end if
+    tick()
+end sub
+
+sub startDecode(e as object)
+    m.decoderSeq += 1
+    p = m.decoders.CreateChild("Poster")
+    p.id = "dec" + m.decoderSeq.ToStr()
+    ' limitSize: scaled down to fit the screen while it is decoded (never
+    ' the original's full size in texture memory), aspect kept, so
+    ' bitmapWidth/Height give the picture's true shape.
+    p.loadWidth = Ui.SCREEN_W
+    p.loadHeight = Ui.SCREEN_H
+    p.loadDisplayMode = "limitSize"
+    p.width = Ui.SCREEN_W
+    p.height = Ui.SCREEN_H
+    m.decoderKeys[p.id] = e.key
+    e.decoder = p
+    e.status = "decoding"
+    p.ObserveField("loadStatus", "onDecoderStatus")
+    p.uri = e.file
+end sub
+
+sub onDecoderStatus(event as object)
+    node = event.GetRoSGNode()
+    key = m.decoderKeys[node.id]
+    if key = invalid then return
+    e = m.cache[key]
+    if e = invalid or e.decoder = invalid or not e.decoder.IsSameNode(node) then return
+    status = event.GetData()
+    if status = "ready" and node.bitmapWidth > 0 then
+        e.w = node.bitmapWidth
+        e.h = node.bitmapHeight
+        e.status = "ready"
+        ' Proven and measured: the texture is let go at once. The layers
+        ' decode at display size themselves (ahead of time, see Render), so
+        ' texture memory holds the wall's two layers and little else.
+        releaseDecoder(e)
+        if e.error <> invalid and Left(e.error, 6) = "decode" then e.error = invalid
+        tick()
+    else if status = "failed" or (status = "ready" and node.bitmapWidth = 0) then
+        ' Downloaded but undecodable here: never try this file again this
+        ' session (docs/CONFORMANCE-RESULTS.md records which formats fail).
+        m.badUrls[e.url] = true
+        e.error = "decode " + Util.extensionOf(e.url)
+        releaseDecoder(e)
+        e.ci += 1
+        e.status = "queued"
+        tick()
+    end if
+end sub
+
+sub releaseDecoder(e as object)
+    if e.decoder = invalid then return
+    m.decoderKeys.Delete(e.decoder.id)
+    e.decoder.uri = ""
+    m.decoders.RemoveChild(e.decoder)
+    e.decoder = invalid
+end sub
+
+sub failEntry(e as object)
+    e.status = "error"
+    e.failedAt = monoNow()
+    if e.error = invalid then e.error = "no copy of this file could be loaded"
+    ' The dashboard shows it in the screen's state (SPEC §6.2).
+    m.S.lastError = "could not load " + e.id
+end sub
+
+sub evictEntry(e as object)
+    releaseDecoder(e)
+    m.cache.Delete(e.key)
+end sub
+
+' Runs every tick: hold what is wanted, drop the rest, start loads.
+sub manageCache(now as double)
+    wanted = Planner.wanted(m.S, now)
+    keep = {}
+    decodeKeys = {}
+    nextSeen = false
+    pins = []
+    for each w in wanted
+        e = ensureEntry(w.item, w.settings)
+        w.entry = e
+        keep[e.key] = true
+        if w.role = "takeover" or w.role = "current" then decodeKeys[e.key] = true
+        if w.role = "next" and not nextSeen then
+            decodeKeys[e.key] = true
+            nextSeen = true
+        end if
+        if e.url <> "" then pins.Push(e.url)
+    end for
+    for each layer in m.layers
+        if layer.entryKey <> invalid then keep[layer.entryKey] = true
+    end for
+    for each key in Util.keysOf(m.cache)
+        if not keep.DoesExist(key) then evictEntry(m.cache[key])
+    end for
+
+    loading = 0
+    for each key in m.cache
+        if m.cache[key].status = "fetching" then loading += 1
+    end for
+    ' The piece about to go up is never queued behind a background download
+    ' for keeping the whole show: those only take slots left free.
+    slots = { free: MAX_LOADING - loading }
+    for each w in wanted
+        advance(w.entry, decodeKeys.DoesExist(w.entry.key), slots)
+    end for
+    ' A probe still decoding for a piece no longer due is let go.
+    for each key in m.cache
+        e = m.cache[key]
+        if e.decoder <> invalid and e.status = "decoding" and not decodeKeys.DoesExist(key) then
+            releaseDecoder(e)
+            e.status = "fetched"
+        end if
+    end for
+    m.pinnedUrls = pins
+
+    ' QR codes for what is on screen and what is next.
+    for i = 0 to Util.min(1, wanted.Count() - 1)
+        w = wanted[i]
+        if w.settings.qrTarget <> "NONE" then requestQr(w.item.id, w.settings.qrTarget)
+    end for
+    pruneQr(wanted)
+
+    pumpKept(loading)
+end sub
+
+' The LRU in MediaTask must not evict what is on screen or due.
+sub flushPinned()
+    text = m.pinnedUrls.Join(Chr(10))
+    if text = m.pinnedSent then return
+    m.pinnedSent = text
+    mediaSend("pin", { urls: m.pinnedUrls }, {})
+end sub
+
+' Memory only: every entry not on the wall (or all). Files stay on disk.
+sub clearCache(all as boolean)
+    inUse = {}
+    if not all then
+        for each layer in m.layers
+            if layer.entryKey <> invalid then inUse[layer.entryKey] = true
+        end for
+    end if
+    for each key in Util.keysOf(m.cache)
+        if not inUse.DoesExist(key) then evictEntry(m.cache[key])
+    end for
+end sub
+
+' The `clear-cache` command: cached files too, keeping what is on the wall.
+sub clearCacheCommand()
+    clearCache(false)
+    keepUrls = []
+    for each layer in m.layers
+        e = invalid
+        if layer.entryKey <> invalid then e = m.cache[layer.entryKey]
+        if e <> invalid and e.url <> "" then keepUrls.Push(e.url)
+    end for
+    mediaSend("clearCache", { keep: keepUrls }, {})
+    m.badUrls = {}
+end sub
+
+' Ready pieces (files on hand), for state.cached.
+function countReady() as integer
+    n = 0
+    for each key in m.cache
+        st = m.cache[key].status
+        if st = "fetched" or st = "decoding" or st = "ready" then n += 1
+    end for
+    return n
+end function
+
+' Ready pieces ahead of the one on the wall, for state.bufferedAhead.
+function bufferedAhead() as integer
+    if m.mode <> "player" and m.mode <> "sample" then return 0
+    n = 0
+    for each w in Planner.wanted(m.S, serverNow())
+        if w.role = "next" then
+            e = m.cache[entryKeyFor(w.item, w.settings)]
+            if e <> invalid and (e.status = "fetched" or e.status = "decoding" or e.status = "ready") then n += 1
+        end if
+    end for
+    return n
+end function
+
+' --- QR codes (SPEC §9): downloaded with the Bearer header to tmp:/, because
+' a Poster cannot send headers. Cached per item + target for the show version.
+
+sub requestQr(itemId as string, target as string)
+    key = itemId + "|" + target
+    have = m.qrCache[key]
+    if have <> invalid and (have.state <> "failed" or monoNow() - have.at < 30000) then return
+    sample = m.mode = "sample"
+    path = "/api/v1/device/qr?item="
+    if sample then path = "/api/v1/device/sample/qr?item="
+    file = "tmp:/qr-" + md5(key + "|" + m.mode + "|" + m.qrGen.ToStr()) + ".png"
+    m.qrCache[key] = { state: "loading", path: "", at: monoNow() }
+    ' The sample's codes are public; a screen's own need its token.
+    apiSend("qr", "GET", path + Util.urlEncode(itemId), "", not sample, { qrKey: key, toFile: file, gen: m.qrGen, sample: sample })
+end sub
+
+sub onQrResponse(r as object, ctx as object)
+    if ctx.gen <> m.qrGen then return
+    e = m.qrCache[ctx.qrKey]
+    if e = invalid then return
+    if r.ok = true and Util.str(r.file) <> invalid then
+        e.state = "ready"
+        e.path = r.file
+        paintQr()
+    else if r.status = 404 then
+        e.state = "none" ' the piece has no link: no code, quietly
+    else if not ctx.sample and r.status = 401 and r.code = "SCREEN_NOT_LINKED" then
+        unlinkLocally()
+    else
+        e.state = "failed"
+        e.at = monoNow()
+    end if
+end sub
+
+sub paintQr()
+    for each layer in m.layers
+        if layer.qrKey <> invalid then
+            e = m.qrCache[layer.qrKey]
+            if e <> invalid and e.state = "ready" and layer.node.qrUri <> e.path then layer.node.qrUri = e.path
+        end if
+    end for
+end sub
+
+sub pruneQr(wanted as object)
+    keep = {}
+    for each w in wanted
+        keep[w.item.id + "|" + w.settings.qrTarget] = true
+    end for
+    for each layer in m.layers
+        if layer.qrKey <> invalid then keep[layer.qrKey] = true
+    end for
+    for each key in Util.keysOf(m.qrCache)
+        if not keep.DoesExist(key) then m.qrCache.Delete(key)
+    end for
+end sub
+
+sub clearQrCache()
+    m.qrCache = {}
+    m.qrGen += 1
+end sub

@@ -1,0 +1,215 @@
+' The poll (SPEC §4) — simulator section 4. One request every pollMs is the
+' heartbeat, the instruction channel and the report. The rules are in
+' SyncLogic (tested against canned answers); this file sends, receives and
+' carries out the actions.
+
+sub startPlayer()
+    m.pairRun += 1
+    m.pairTimer.control = "stop"
+    endSample()
+    m.mode = "player"
+    m.S.status = invalid
+    showScreen("connecting")
+    loadSnapshot()
+    restoreKept()
+    tick()
+    scheduleSync(0)
+end sub
+
+sub scheduleSync(ms as integer)
+    m.syncTimer.control = "stop"
+    m.syncTimer.duration = Util.max(0.05, ms / 1000.0)
+    m.nextSyncAt = monoNow() + ms
+    m.syncTimer.control = "start"
+end sub
+
+sub stopSync()
+    m.syncTimer.control = "stop"
+    m.nextSyncAt = invalid
+    m.syncing = false
+end sub
+
+' Ask for a sync as soon as the one in flight (if any) is answered.
+sub syncNow()
+    if m.syncing then
+        m.S.syncSoon = true
+    else
+        scheduleSync(0)
+    end if
+end sub
+
+sub syncOnce()
+    if m.mode <> "player" or m.device = invalid or m.syncing then return
+    plays = []
+    if not m.S.online then plays = PlayLog.pending(m.log, 2000)
+    built = SyncLogic.buildBody(m.S, {
+        state: reportState()
+        capabilities: m.caps
+        appVersion: m.appVersion
+        plays: plays
+    })
+    m.syncing = true
+    m.syncBuilt = built
+    apiSend("sync", "POST", "/api/v1/device/sync", SyncLogic.encodeBody(built), true, { device: m.device.deviceId })
+end sub
+
+sub onSyncResponse(r as object, ctx as object)
+    m.syncing = false
+    if m.mode <> "player" or m.device = invalid or ctx.device <> m.device.deviceId then return
+    built = m.syncBuilt
+    res = SyncLogic.onResponse(m.S, r, built, monoNow())
+    ' What was sent is the server's now (SPEC §4.1 plays).
+    if r.ok = true and Util.isAA(r.data) and built <> invalid then PlayLog.settle(m.log, built.sentPlays)
+    for each a in res.actions
+        if a.type = "unlink" then
+            unlinkLocally()
+            return
+        end if
+        runSyncAction(a)
+    end for
+    if res.nextMs <> invalid and m.mode = "player" then scheduleSync(res.nextMs)
+    tick()
+end sub
+
+sub runSyncAction(a as object)
+    kind = a.type
+    if kind = "showChanged" then
+        if a.playlist = true and a.qrChanged = true then clearQrCache()
+        saveSnapshot()
+    else if kind = "keepOffline" then
+        setKeepOffline(a.on)
+    else if kind = "reload" then
+        dropPlaylist()
+    else if kind = "clearCache" then
+        ' Cached media goes; what is on the wall is decoded and stays up.
+        clearCacheCommand()
+        if m.kept.on then restartKept()
+    else if kind = "saveAck" then
+        storeWrite("ackSeq", Str(a.ackSeq).Trim())
+        if m.device <> invalid then m.device.ackSeq = a.ackSeq
+    end if
+end sub
+
+' "reload": forget the playlist and every cached file, ask for the show again.
+sub dropPlaylist()
+    m.S.show = invalid
+    m.S.forceFull = true
+    m.S.syncSoon = true
+    storeDelete("snapshot")
+    stopFilm()
+    clearLayers()
+    clearCache(true)
+    clearQrCache()
+end sub
+
+' The free-form state shown live on the owner's dashboard (≤ 4 KB).
+function reportState() as object
+    cur = m.layers[m.front]
+    t = m.target
+    st = {
+        itemId: cur.itemId
+        index: cur.index
+        paused: t <> invalid and t.paused = true
+        cached: countReady()
+        bufferedAhead: bufferedAhead()
+        error: m.S.lastError
+        ' Honest: false while dark (outside the schedule) — SPEC §4.1.
+        visible: not m.blackout
+    }
+    if st.error = invalid and m.kept.error <> invalid then st.error = m.kept.error
+    if m.kept.on then
+        counts = keptCounts()
+        st.stored = counts.stored
+        st.total = counts.total
+    end if
+    return st
+end function
+
+' While polls fail, write down what is visibly on the wall, in server time
+' (SPEC §4.1 plays). Nothing while dark.
+sub logOfflinePlay()
+    if m.mode <> "player" or m.S.online or m.blackout then return
+    cur = m.layers[m.front]
+    if cur.itemId = invalid then return
+    PlayLog.record(m.log, cur.itemId, serverNow())
+end sub
+
+' --- The snapshot: the last playlist and clock, so a screen that restarts
+' without network still knows what to play (SPEC §4.3). It lives in the
+' registry (16 KB for the whole app, so it is trimmed to fit) and, while the
+' gallery is kept on the device, in full on the stick.
+
+sub saveSnapshot()
+    if m.mode <> "player" or m.device = invalid then return
+    if m.S.show = invalid then
+        storeDelete("snapshot")
+        return
+    end if
+    text = snapshotText(m.S.show, true)
+    if Len(text) <= 9000 then
+        storeWrite("snapshot", text)
+    else
+        storeDelete("snapshot")
+    end if
+    if m.kept.on and m.storage.extWritable = true then
+        mediaSend("writeText", { path: m.storage.ext + "/solpersona/show.json", text: snapshotText(m.S.show, false) }, {})
+    end if
+end sub
+
+' Epoch times are written as digit strings: FormatJson prints large Doubles
+' in exponent form, which would lose the milliseconds the clock needs.
+function snapshotText(show as object, trim as boolean) as string
+    timeline = []
+    for each slot in show.timeline
+        timeline.Push({ id: slot.id, ms: Int(slot.ms), estimated: slot.estimated })
+    end for
+    items = []
+    for each item in show.items
+        if trim then
+            desc = invalid
+            if show.settings.showDescription and Util.str(item.description) <> invalid then desc = Left(item.description, 280)
+            items.Push({ id: item.id, kind: item.kind, title: item.title, artist: item.artist, year: item.year, description: desc, media: item.media })
+        else
+            items.Push(item)
+        end if
+    end for
+    paused = ""
+    if Util.isNumber(show.pausedAtMs) then paused = Util.intString(show.pausedAtMs)
+    snap = {
+        baseUrl: m.config.baseUrl
+        deviceId: m.device.deviceId
+        offset: Util.intString(m.S.clock.offset)
+        show: {
+            id: show.id
+            version: show.version
+            sourceRef: show.sourceRef
+            epochMs: Util.intString(show.epochMs)
+            pausedAtMs: paused
+            settings: show.settings
+            items: items
+            timeline: timeline
+        }
+    }
+    return FormatJson(snap)
+end function
+
+sub loadSnapshot()
+    if m.S.show <> invalid then return
+    raw = ""
+    if storeRead("kept") = "1" and m.storage.extWritable = true then raw = ReadAsciiFile(m.storage.ext + "/solpersona/show.json")
+    if raw = "" then raw = storeRead("snapshot")
+    if raw = "" then return
+    applySnapshot(ParseJson(raw))
+end sub
+
+sub applySnapshot(snap as dynamic)
+    if not Util.isAA(snap) or not Util.isAA(snap.show) or m.device = invalid then return
+    if snap.baseUrl <> m.config.baseUrl or snap.deviceId <> m.device.deviceId then return
+    show = snap.show
+    show.epochMs = Util.parseBig(show.epochMs)
+    show.pausedAtMs = Util.parseBig(show.pausedAtMs)
+    if show.epochMs = invalid then return
+    m.S.show = SyncLogic.showOf(show)
+    offset = Util.parseBig(snap.offset)
+    if offset <> invalid and not m.S.clock.synced then m.S.clock.offset = offset
+end sub

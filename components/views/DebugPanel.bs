@@ -1,0 +1,8 @@
+import "pkg:/components/ui/Ui.bs"
+
+sub init()
+    body = m.top.FindNode("body")
+    body.font = Ui.makeFont(Ui.MONO_REGULAR, 14)
+    body.wrap = true
+    body.lineSpacing = 3
+end sub

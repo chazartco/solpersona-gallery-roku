@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Media files on disk: downloads (two at a time, as the scene schedules them),
+  the streaming cache with its LRU budget, the files kept on a USB stick or SD
+  card for keepOffline (SPEC §11a), and small text writes (the kept index and
+  the playlist snapshot). Nothing here decides what to fetch: the scene does.
+
+  `storage` is filled once at start-up with what this Roku can do:
+    { cacheDir, cacheBudgetMb, ext, extWritable, extFreeMb, extNote }
+-->
+<component name="MediaTask" extends="Task">
+    <interface>
+        <field id="request" type="assocarray" />
+        <field id="response" type="assocarray" />
+        <field id="storage" type="assocarray" />
+        <!-- Development only: use this volume as "the stick" (e.g. "cachefs:") to
+             exercise keepOffline where no writable stick is at hand. -->
+        <field id="keepVolume" type="string" />
+    </interface>
+</component>

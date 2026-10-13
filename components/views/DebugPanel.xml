@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Developer overlay (SPEC §11): the simulator's D panel, as text. Toggled
+  from the OK overlay or the hidden developer menu. Never shows the token.
+-->
+<component name="DebugPanel" extends="Group">
+    <interface>
+        <field id="text" type="string" alias="body.text" />
+    </interface>
+    <children>
+        <Rectangle width="560" height="1080" color="0x08080AE8" />
+        <Rectangle translation="[560, 0]" width="1" height="1080" color="0xFFFFFF17" />
+        <Label id="body" translation="[18, 14]" width="530" color="0xCFD3D8FF" />
+    </children>
+</component>

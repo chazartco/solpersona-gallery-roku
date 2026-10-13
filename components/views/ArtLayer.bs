@@ -1,0 +1,421 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Geo.bs"
+import "pkg:/components/ui/Ui.bs"
+
+' spec: {
+'   settings     resolved presentation settings (SPEC §8)
+'   uri          the picture to show: an image file, or a film's still ("" for none)
+'   washUri      BLUR: what the wash is made from ("" for none)
+'   bw, bh       the picture's decoded size (its aspect)
+'   title, artist, year, description   label text ("" when absent)
+'   qr           a QR code is wanted for this piece
+'   captionShown whether the label starts visible
+'   burn         [dx, dy] burn-in shift of the corners
+' }
+
+' Labels are drawn 10% larger than the simulator's proportions: a browser
+' window is read from a desk, a television from across a room.
+const TYPE_SCALE = 1.1
+
+' The BLUR wash: SceneGraph has no blur filter, so the picture is decoded tiny
+' and stretched over the screen — bilinear upscaling of a tiny decode reads as
+' a soft blur. Two decodes at different sizes are layered so neither's
+' sampling grid shows. Tuned against the simulator's 18 px blur at 1080p.
+const WASH_LO_W = 24
+const WASH_LO_H = 14
+const WASH_HI_W = 56
+const WASH_HI_H = 32
+const WASH_HI_OPACITY = 0.35
+
+sub init()
+    m.back = m.top.FindNode("back")
+    m.piece = m.top.FindNode("piece")
+    m.slot = m.top.FindNode("slot")
+    m.corners = m.top.FindNode("corners")
+    m.captionAnim = m.top.FindNode("captionAnim")
+    m.captionInterp = m.top.FindNode("captionInterp")
+    m.burnAnim = m.top.FindNode("burnAnim")
+    m.burnInterp = m.top.FindNode("burnInterp")
+    m.top.videoSlot = m.slot
+    m.piece.ObserveField("loadStatus", "onPieceStatus")
+    m.labelCard = invalid
+    m.qrCard = invalid
+    m.spec = invalid
+end sub
+
+sub reset()
+    m.captionAnim.control = "stop"
+    m.burnAnim.control = "stop"
+    Ui.clear(m.back)
+    Ui.clear(m.corners)
+    Ui.clear(m.slot)
+    m.piece.uri = ""
+    m.piece.visible = false
+    m.labelCard = invalid
+    m.qrCard = invalid
+    m.top.ready = false
+    m.top.failed = false
+end sub
+
+sub onSpec()
+    reset()
+    spec = m.top.spec
+    if spec = invalid or spec.settings = invalid then
+        m.spec = invalid
+        return
+    end if
+    m.spec = spec
+    s = spec.settings
+    g = Geo.arrange(Ui.SCREEN_W, Ui.SCREEN_H, s, Util.num(spec.bw, 1600), Util.num(spec.bh, 1000))
+    m.top.pieceRect = g.piece
+
+    if s.fit = "FRAME" then
+        Ui.makePoster(m.back, "pkg:/images/ui/bg-frame-wall.jpg", 0, 0, Ui.SCREEN_W, Ui.SCREEN_H)
+    end if
+    if s.fit = "BLUR" and spec.washUri <> "" then buildWash(spec.washUri, g.wash, s.washOpacity / 100.0)
+    if (s.fit = "BLUR" and s.pieceShadow) or s.fit = "BLACK" then
+        ' box-shadow: 0 0.8u 3u rgba(0,0,0,0.45)
+        Ui.makeShadow(m.back, g.piece, Int(0.8 * Ui.UNIT), 0.45)
+    end if
+    if s.fit = "FRAME" then buildFrame(g, s.frameStyle)
+
+    if spec.uri <> "" then
+        ' Decoded at exactly the size it is shown: sharp, and no more texture
+        ' memory than the wall needs. The rectangle already has the
+        ' picture's shape, so filling it never distorts; FILL covers the screen.
+        if g.fill then
+            m.piece.loadWidth = Ui.SCREEN_W
+            m.piece.loadHeight = Ui.SCREEN_H
+            m.piece.loadDisplayMode = "scaleToZoom"
+        else
+            m.piece.loadWidth = g.piece.w
+            m.piece.loadHeight = g.piece.h
+            m.piece.loadDisplayMode = "scaleToFill"
+        end if
+        m.piece.translation = [g.piece.x, g.piece.y]
+        m.piece.width = g.piece.w
+        m.piece.height = g.piece.h
+        m.piece.visible = true
+        m.piece.uri = spec.uri
+        onPieceStatus()
+    else
+        ' A film with no still: the Video node fills the rectangle by itself.
+        m.top.ready = true
+    end if
+
+    m.corners.translation = spec.burn
+    buildLabel(spec, s)
+    if m.labelCard <> invalid and spec.captionShown = false then m.labelCard.opacity = 0
+    layoutCorners()
+end sub
+
+sub onPieceStatus()
+    status = m.piece.loadStatus
+    if status = "ready" then
+        m.top.ready = true
+    else if status = "failed" then
+        m.top.failed = true
+    end if
+end sub
+
+' --- BLUR -------------------------------------------------------------------------
+
+sub buildWash(uri as string, r as object, strength as float)
+    group = m.back.CreateChild("Group")
+    ' washOpacity: how strongly the wash shows over black (0–100).
+    group.opacity = Util.clamp(strength, 0, 1)
+    for each size in [[WASH_LO_W, WASH_LO_H, 1.0], [WASH_HI_W, WASH_HI_H, WASH_HI_OPACITY]]
+        p = group.CreateChild("Poster")
+        p.loadWidth = size[0]
+        p.loadHeight = size[1]
+        p.loadDisplayMode = "scaleToZoom"
+        p.translation = [r.x, r.y]
+        p.width = r.w
+        p.height = r.h
+        p.opacity = size[2]
+        p.uri = uri
+    end for
+end sub
+
+' --- FRAME ------------------------------------------------------------------------
+
+sub buildFrame(g as object, style as string)
+    outer = g.mat
+    if g.moulding <> invalid then outer = g.moulding
+    ' 0 1.4u 3.4u rgba(0,0,0,0.55) and a tight 0 0.2u 0.5u contact shadow.
+    Ui.makeShadow(m.back, outer, Int(1.4 * Ui.UNIT), 0.55)
+    Ui.makeRect(m.back, outer.x, outer.y + 2, outer.w, outer.h, "0x000000FF", 0.35)
+
+    if g.moulding <> invalid then
+        mo = g.moulding
+        mw = g.mat.x - mo.x
+        name = "pkg:/images/frames/" + LCase(style) + "-"
+        ' Top and bottom run the full width; the sides sit between them.
+        Ui.makePoster(m.back, name + "top.png", mo.x, mo.y, mo.w, mw)
+        Ui.makePoster(m.back, name + "bottom.png", mo.x, mo.y + mo.h - mw, mo.w, mw)
+        Ui.makePoster(m.back, name + "left.png", mo.x, mo.y + mw, mw, mo.h - 2 * mw)
+        Ui.makePoster(m.back, name + "right.png", mo.x + mo.w - mw, mo.y + mw, mw, mo.h - 2 * mw)
+    end if
+
+    mt = g.mat
+    ' The mat: warm white (SPEC §8), with a soft inset shadow under the
+    ' moulding (CSS inset 0 0.25u 0.7u) drawn as hairlines: heavier along the
+    ' top, faint at the sides and bottom.
+    Ui.makeRect(m.back, mt.x, mt.y, mt.w, mt.h, "0xFBFAF7FF")
+    for i = 0 to 8
+        Ui.makeRect(m.back, mt.x, mt.y + i, mt.w, 1, "0x000000FF", 0.24 * (1 - i / 9.0) ^ 2)
+    end for
+    for i = 0 to 4
+        a = 0.08 * (1 - i / 5.0) ^ 2
+        Ui.makeRect(m.back, mt.x + i, mt.y, 1, mt.h, "0x000000FF", a)
+        Ui.makeRect(m.back, mt.x + mt.w - 1 - i, mt.y, 1, mt.h, "0x000000FF", a)
+    end for
+    for i = 0 to 3
+        Ui.makeRect(m.back, mt.x, mt.y + mt.h - 1 - i, mt.w, 1, "0x000000FF", 0.05 * (1 - i / 4.0) ^ 2)
+    end for
+    ' The bevel of the mat's window: a thin bright edge, then a faint line.
+    p = g.piece
+    Ui.makeRect(m.back, p.x - 3, p.y - 3, p.w + 6, p.h + 6, "0x00000024")
+    Ui.makeRect(m.back, p.x - 2, p.y - 2, p.w + 4, p.h + 4, "0xFFFDF8FF")
+end sub
+
+' --- The wall label -----------------------------------------------------------------
+
+sub buildLabel(spec as object, s as object)
+    if s.captionStyle = "NONE" then return
+    title = ""
+    artist = ""
+    year = ""
+    desc = ""
+    if s.showTitle then title = spec.title
+    if s.showArtist then artist = spec.artist
+    if s.showYear then year = spec.year
+    if s.captionStyle = "LABEL" and s.showDescription then desc = spec.description
+    if title = "" and artist = "" and year = "" and desc = "" then return
+    if s.captionStyle = "MINIMAL" then
+        buildMinimal(title, artist, year)
+    else
+        buildCard(title, artist, year, desc)
+    end if
+end sub
+
+' The museum card: title in italic serif, artist, year muted, description.
+' Always on a dark translucent panel — bare text vanishes over a white painting.
+sub buildCard(title as string, artist as string, year as string, desc as string)
+    card = m.corners.CreateChild("Group")
+    card.id = "labelCard"
+    maxW = Int(36 * Ui.UNIT * TYPE_SCALE)
+    padX = Int(2.1 * Ui.UNIT)
+    padTop = Int(1.7 * Ui.UNIT)
+    padBottom = Int(1.8 * Ui.UNIT)
+    inner = maxW - 2 * padX
+
+    ' Shadow and panel go under the text; they are sized once the text is measured.
+    shadow = Ui.makePoster(card, "pkg:/images/ui/shadow.9.png", 0, 0, 1, 1)
+    shadow.opacity = 0.3
+    bg = Ui.makePanel(card, 0, 0, 1, 1, "0x0E0D0CFF", 0.62, 6)
+    ring = Ui.makeRing(card, 0, 0, 1, 1, "0xFFFFFFFF", 0.07)
+
+    lines = []
+    if title <> "" then lines.Push({ text: title, font: Ui.SERIF_ITALIC, size: Int(2.5 * Ui.UNIT * TYPE_SCALE), color: Ui.CARD_INK, gap: 0, maxLines: 3, spacing: 2 })
+    if artist <> "" then lines.Push({ text: artist, font: Ui.SANS_BOLD, size: Int(1.6 * Ui.UNIT * TYPE_SCALE), color: Ui.CARD_INK, gap: Int(0.8 * Ui.UNIT), maxLines: 2, spacing: 2 })
+    if year <> "" then lines.Push({ text: year, font: Ui.SANS, size: Int(1.45 * Ui.UNIT * TYPE_SCALE), color: "0xF3F0EAA8", gap: Int(0.3 * Ui.UNIT), maxLines: 1, spacing: 0 })
+    if desc <> "" then lines.Push({ text: desc, font: Ui.SANS, size: Int(1.38 * Ui.UNIT * TYPE_SCALE), color: "0xF3F0EACC", gap: Int(1.1 * Ui.UNIT), maxLines: 4, spacing: Int(0.5 * 1.38 * Ui.UNIT) })
+
+    ' Shrink-wrap: as wide as the longest line, never wider than the card's maximum.
+    nodes = []
+    widest = 0
+    for each line in lines
+        node = Ui.makeLabel(card, line.font, line.size, line.color, line.text, {})
+        widest = Util.max(widest, Ui.sizeOf(node).w)
+        nodes.Push(node)
+    end for
+    w = Util.min(inner, widest)
+    y = padTop
+    for i = 0 to nodes.Count() - 1
+        node = nodes[i]
+        line = lines[i]
+        node.width = w
+        node.wrap = true
+        node.maxLines = line.maxLines
+        node.lineSpacing = line.spacing
+        if i > 0 then y += line.gap
+        node.translation = [padX, y]
+        y += Ui.sizeOf(node).h
+    end for
+    cw = Int(w + 2 * padX)
+    ch = Int(y + padBottom)
+    shadow.translation = [-36, -36 + 6]
+    shadow.width = cw + 72
+    shadow.height = ch + 72
+    bg.width = cw
+    bg.height = ch
+    ring.width = cw
+    ring.height = ch
+    ' The accent rule at the top of the card.
+    Ui.makeRect(card, padX, 0, Int(2.4 * Ui.UNIT), 2, Ui.ACCENT, 0.9)
+    m.labelCard = card
+    m.labelSize = { w: cw, h: ch }
+end sub
+
+' One quiet line — "Title — Artist, Year" — on a dark translucent pill.
+sub buildMinimal(title as string, artist as string, year as string)
+    card = m.corners.CreateChild("Group")
+    card.id = "labelCard"
+    size = Int(1.6 * Ui.UNIT * TYPE_SCALE)
+    padX = Int(1.3 * Ui.UNIT)
+    padY = Int(0.6 * Ui.UNIT)
+    maxW = Int(70 * Ui.UNIT)
+    bg = Ui.makePanel(card, 0, 0, 1, 1, "0x0E0D0CFF", 0.58, 6)
+    ring = Ui.makeRing(card, 0, 0, 1, 1, "0xFFFFFFFF", 0.06)
+
+    restParts = []
+    if artist <> "" then restParts.Push(artist)
+    if year <> "" then restParts.Push(year)
+    rest = restParts.Join(", ")
+
+    parts = []
+    if title <> "" then parts.Push(Ui.makeLabel(card, Ui.SERIF_ITALIC, size + 1, "0xFFFFFFF0", title, {}))
+    if title <> "" and rest <> "" then parts.Push(Ui.makeLabel(card, Ui.SANS, size, "0xFFFFFF8C", "—", {}))
+    if rest <> "" then parts.Push(Ui.makeLabel(card, Ui.SANS, size, "0xFFFFFFF0", rest, {}))
+
+    sepPad = Int(size * 0.4)
+    total = 0
+    tallest = 0
+    for each node in parts
+        sz = Ui.sizeOf(node)
+        total += sz.w
+        tallest = Util.max(tallest, sz.h)
+    end for
+    total += sepPad * (parts.Count() - 1)
+    ' Too long: the last part gives way first (Label ellipsizes at its width).
+    room = maxW - 2 * padX
+    if total > room and parts.Count() > 0 then
+        last = parts[parts.Count() - 1]
+        over = total - room
+        last.width = Util.max(40, Ui.sizeOf(last).w - over)
+    end if
+    x = padX
+    for i = 0 to parts.Count() - 1
+        node = parts[i]
+        sz = Ui.sizeOf(node)
+        if node.width > 0 then sz.w = node.width
+        node.translation = [x, padY + Int((tallest - sz.h) / 2)]
+        x += sz.w
+        if i < parts.Count() - 1 then x += sepPad
+    end for
+    cw = Int(x + padX)
+    ch = Int(tallest + 2 * padY)
+    bg.width = cw
+    bg.height = ch
+    ring.width = cw
+    ring.height = ch
+    m.labelCard = card
+    m.labelSize = { w: cw, h: ch }
+end sub
+
+' --- The QR code ------------------------------------------------------------------------
+
+sub onQr()
+    uri = m.top.qrUri
+    if m.spec = invalid or m.spec.qr <> true or uri = "" or m.qrCard <> invalid then return
+    w = Int(11 * Ui.UNIT)
+    pad = Int(0.55 * Ui.UNIT)
+    img = w - 2 * pad
+    card = m.corners.CreateChild("Group")
+    shadow = Ui.makePoster(card, "pkg:/images/ui/shadow.9.png", -36, -36 + 5, 1, 1)
+    shadow.opacity = 0.3
+    bg = Ui.makePanel(card, 0, 0, w, 1, "0xFFFFFFFF", 1.0, 6)
+    code = card.CreateChild("Poster")
+    code.loadWidth = img
+    code.loadHeight = img
+    code.loadDisplayMode = "scaleToFit"
+    code.translation = [pad, pad]
+    code.width = img
+    code.height = img
+    code.uri = uri
+    caption = Ui.makeLabel(card, Ui.SANS, 14, "0x131211FF", "Scan to view", { width: w, align: "center", y: pad + img + 1 })
+    h = Int(pad + img + 1 + Ui.sizeOf(caption).h + Int(0.5 * Ui.UNIT))
+    bg.height = h
+    shadow.width = w + 72
+    shadow.height = h + 72
+    m.qrCard = card
+    m.qrSize = { w: w, h: h }
+    layoutCorners()
+end sub
+
+' --- Corners -------------------------------------------------------------------------------
+'
+' A QR above a label when they share a corner (simulator section 6); each
+' group is anchored 3.2u in from its corner and aligned to its outer edge.
+
+sub layoutCorners()
+    if m.spec = invalid then return
+    s = m.spec.settings
+    byCorner = {}
+    if m.labelCard <> invalid then addToCorner(byCorner, s.captionCorner, "label")
+    if m.qrCard <> invalid then addToCorner(byCorner, s.qrCorner, "qr")
+    gap = Int(1.2 * Ui.UNIT)
+    for each corner in byCorner
+        names = byCorner[corner]
+        ' Bottom corners stack the QR on top; top corners put the label first.
+        if names.Count() = 2 then
+            if Geo.isBottom(corner) then
+                names = ["qr", "label"]
+            else
+                names = ["label", "qr"]
+            end if
+        end if
+        gw = 0
+        gh = 0
+        for each name in names
+            sz = sizeFor(name)
+            gw = Util.max(gw, sz.w)
+            gh += sz.h
+        end for
+        gh += gap * (names.Count() - 1)
+        origin = Geo.cornerAt(corner, Ui.SCREEN_W, Ui.SCREEN_H, gw, gh)
+        y = origin[1]
+        for each name in names
+            sz = sizeFor(name)
+            x = origin[0]
+            if Geo.isRight(corner) then x = origin[0] + gw - sz.w
+            nodeFor(name).translation = [x, y]
+            y += sz.h + gap
+        end for
+    end for
+end sub
+
+sub addToCorner(byCorner as object, corner as string, name as string)
+    if not byCorner.DoesExist(corner) then byCorner[corner] = []
+    byCorner[corner].Push(name)
+end sub
+
+function sizeFor(name as string) as object
+    if name = "qr" then return m.qrSize
+    return m.labelSize
+end function
+
+function nodeFor(name as string) as object
+    if name = "qr" then return m.qrCard
+    return m.labelCard
+end function
+
+' captionTiming START: up for the first ~8 s of each piece, then it fades.
+sub onCaption()
+    if m.labelCard = invalid then return
+    target = 0.0
+    if m.top.captionShown then target = 1.0
+    if Abs(m.labelCard.opacity - target) < 0.01 then return
+    m.captionAnim.control = "stop"
+    m.captionInterp.fieldToInterp = "labelCard.opacity"
+    m.captionInterp.keyValue = [m.labelCard.opacity, target]
+    m.captionAnim.control = "start"
+end sub
+
+' burnInGuard: the corners drift a few pixels, slowly, every couple of minutes.
+sub onBurn()
+    m.burnAnim.control = "stop"
+    m.burnInterp.keyValue = [m.corners.translation, m.top.burnOffset]
+    m.burnAnim.control = "start"
+end sub

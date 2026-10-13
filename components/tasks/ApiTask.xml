@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  Every call to the device API (SPEC §3–§11b) — JSON requests and the
+  token-authenticated QR downloads — runs here, off the render thread.
+
+  The scene sets `request` (one at a time, as often as it likes; requests run
+  concurrently) and observes `response`, which carries the request's `id`.
+  The access token is set once on `token` and only ever leaves this task as an
+  Authorization header to the configured base URL.
+-->
+<component name="ApiTask" extends="Task">
+    <interface>
+        <field id="request" type="assocarray" />
+        <field id="response" type="assocarray" />
+        <field id="token" type="string" />
+        <field id="baseUrl" type="string" />
+    </interface>
+</component>

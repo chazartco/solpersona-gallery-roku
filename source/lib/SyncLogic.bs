@@ -1,0 +1,328 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Clock.bs"
+import "pkg:/source/lib/Hours.bs"
+import "pkg:/source/lib/Prefs.bs"
+
+' The poll (SPEC §4) and commands (SPEC §7) as a pure state machine.
+'
+' The scene owns one state object `S` (see `create`). It asks `buildBody` what
+' to send, hands every answer to `onResponse`, and carries out the actions that
+' come back. Nothing here touches a node, a file or the network, so every rule
+' is covered by tests/specs/SyncLogic.spec.bs against canned answers.
+'
+' Response objects come from ApiTask:
+'   { status, ok, data, code, message, retryAfterMs, network, sentAt, receivedAt }
+' where `network` is true when no HTTP answer arrived at all, and the two
+' stamps are local monotonic milliseconds.
+
+namespace SyncLogic
+
+    function create() as object
+        return {
+            status: invalid          ' IDLE | PLAYING | UNLICENSED, invalid until the first answer
+            deviceInfo: invalid      ' { id, name, owner, keepOffline }
+            show: invalid            ' { id, version, sourceRef, epochMs, pausedAtMs, settings, items, timeline, byId }
+            takeover: invalid        ' { item, settings, startedAt, startedAtMs, until, untilMs }
+            ackSeq: 0
+            pendingDurations: {}     ' itemId → ms, sent with the next poll
+            reportedDurations: {}    ' itemId → true: each video reported once per show version
+            online: true
+            failures: 0
+            pollMs: 3000
+            lastSyncAt: invalid
+            lastLatencyMs: invalid
+            lastHttp: invalid
+            forceFull: false         ' send showId/version null: "send me the playlist again"
+            syncSoon: false
+            lastError: invalid
+            identifyUntil: 0#
+            handledCommands: []
+            keepOffline: false
+            clock: Clock.createOffset()
+        }
+    end function
+
+    ' The body of POST /api/v1/device/sync. `extra` carries what the scene
+    ' knows: { state, capabilities, appVersion, plays }. Returns
+    ' { body, sentDurations, sentPlays } so the answer can settle exactly what
+    ' was sent. `plays` is left out of `body`: it is spliced in by
+    ' `encodeBody`, because FormatJson prints epoch milliseconds in exponent form.
+    function buildBody(S as object, extra as object) as object
+        sentDurations = []
+        for each id in S.pendingDurations
+            if sentDurations.Count() >= 50 then exit for
+            sentDurations.Push({ itemId: id, ms: Int(S.pendingDurations[id]) })
+        end for
+        full = S.forceFull or S.show = invalid
+        body = {
+            showId: invalid
+            version: invalid
+            ackSeq: S.ackSeq
+            durations: sentDurations
+        }
+        ' Brackets, not dots: BrightScript stores a key assigned with a dot in
+        ' lower case, and FormatJson would send "showid" / "appversion".
+        if not full then
+            body["showId"] = S.show.id
+            body["version"] = S.show.version
+        end if
+        if extra.state <> invalid then body["state"] = extra.state
+        if extra.capabilities <> invalid then body["capabilities"] = extra.capabilities
+        if extra.appVersion <> invalid then body["appVersion"] = extra.appVersion
+        plays = []
+        if Util.isArray(extra.plays) then plays = extra.plays
+        return { body: body, sentDurations: sentDurations, plays: plays, sentPlays: plays.Count() }
+    end function
+
+    ' JSON text for a body from buildBody, with `plays` written by hand so
+    ' `startedAt` keeps every millisecond.
+    function encodeBody(built as object) as string
+        text = FormatJson(built.body)
+        if built.plays.Count() = 0 then return text
+        entries = []
+        for each p in built.plays
+            entries.Push("{" + Chr(34) + "itemId" + Chr(34) + ":" + FormatJson(p.itemId) + "," + Chr(34) + "startedAt" + Chr(34) + ":" + Util.intString(p.startedAt) + "," + Chr(34) + "ms" + Chr(34) + ":" + Util.intString(Util.max(0, p.ms)) + "}")
+        end for
+        return Left(text, Len(text) - 1) + "," + Chr(34) + "plays" + Chr(34) + ":[" + entries.Join(",") + "]}"
+    end function
+
+    ' Handles one answer to a sync. Returns { actions, nextMs } where nextMs is
+    ' when to poll again (invalid: stop polling). Actions, in order:
+    '   { type: "unlink" }                      the token is dead: back to pairing
+    '   { type: "showChanged", playlist, moved }  the held show changed
+    '   { type: "keepOffline", on }             the owner's "keep on the screen" switch
+    '   { type: "identify" } | { type: "reload" } | { type: "clearCache" }
+    '   { type: "saveAck", ackSeq }             persist the highest command done
+    function onResponse(S as object, r as object, built as object, nowLocal as double) as object
+        actions = []
+        if r.status = 401 and (r.code = "SCREEN_NOT_LINKED" or r.code = "UNAUTHENTICATED") then
+            actions.Push({ type: "unlink" })
+            return { actions: actions, nextMs: invalid }
+        end if
+
+        S.lastHttp = r.status
+        if r.network = true or r.ok <> true or not Util.isAA(r.data) then
+            ' Offline, or the server answered with an error: keep playing by the
+            ' last clock and try again with backoff (SPEC §4.3).
+            S.online = false
+            S.failures += 1
+            if r.network = true then
+                S.lastError = "offline"
+            else if Util.str(r.code) <> invalid then
+                S.lastError = r.code
+            else
+                S.lastError = "HTTP " + Str(r.status).Trim()
+            end if
+            return { actions: actions, nextMs: SyncLogic.backoffMs(r, S.failures) }
+        end if
+
+        data = r.data
+        Clock.addSample(S.clock, data.serverTime, r.sentAt, r.receivedAt)
+        S.lastLatencyMs = r.receivedAt - r.sentAt
+        if built <> invalid then
+            for each d in built.sentDurations
+                S.pendingDurations.Delete(d.itemId)
+            end for
+        end if
+        S.online = true
+        S.failures = 0
+        if S.lastError <> invalid and Left(S.lastError, 13) <> "could not load" then S.lastError = invalid
+        S.lastSyncAt = nowLocal
+        S.forceFull = false
+        poll = Util.num(data.pollMs)
+        if poll > 0 then S.pollMs = Int(Util.max(1000, poll)) else S.pollMs = 3000
+        S.status = Util.strOr(data.status, "IDLE")
+        if Util.isAA(data.device) then
+            S.deviceInfo = {
+                id: Util.strOr(data.device.id, "")
+                name: Util.strOr(data.device.name, "")
+                owner: Util.str(data.device.owner)
+                keepOffline: data.device.keepOffline = true
+            }
+        end if
+
+        incoming = data.show
+        if S.status = "UNLICENSED" then incoming = invalid
+        change = SyncLogic.applyShow(S, incoming)
+        if change <> invalid then actions.Push(change)
+
+        ' Only a real answer switches keeping on or off: a screen that boots with
+        ' no network keeps what it holds until the server says otherwise.
+        keep = Util.isAA(data.device) and data.device.keepOffline = true
+        S.keepOffline = keep
+        actions.Push({ type: "keepOffline", on: keep })
+
+        S.takeover = SyncLogic.takeoverOf(data.takeover)
+        commands = []
+        if Util.isArray(data.commands) then commands = data.commands
+        actions.Append(SyncLogic.handleCommands(S, commands, nowLocal))
+
+        nextMs = S.pollMs
+        if S.syncSoon then
+            S.syncSoon = false
+            nextMs = 50
+        end if
+        return { actions: actions, nextMs: nextMs }
+    end function
+
+    ' 429: wait Retry-After (else 15 s). Anything else: 3 s → 6 → 12 … max 60 s.
+    function backoffMs(r as object, failures as integer) as integer
+        if r.status = 429 then
+            if Util.isNumber(r.retryAfterMs) and r.retryAfterMs > 0 then return Int(Util.min(3600000, r.retryAfterMs))
+            return 15000
+        end if
+        wait = 3000#
+        i = 1
+        while i < failures and wait < 60000
+            wait = wait * 2
+            i += 1
+        end while
+        return Int(Util.min(60000, wait))
+    end function
+
+    ' Takes the `show` part of an answer. The playlist only comes when ours
+    ' differs; when it does, settings, items and timeline are replaced together.
+    ' Returns a "showChanged" action or invalid.
+    function applyShow(S as object, incoming as dynamic) as dynamic
+        prev = S.show
+        if not Util.isAA(incoming) then
+            if prev <> invalid then
+                S.show = invalid
+                return { type: "showChanged", playlist: true, moved: true, cleared: true }
+            end if
+            return invalid
+        end if
+        if Util.isArray(incoming.items) and Util.isArray(incoming.timeline) and Util.isAA(incoming.settings) then
+            S.show = SyncLogic.showOf(incoming)
+            changed = prev = invalid or prev.id <> S.show.id or prev.version <> S.show.version
+            if changed then
+                ' A new version may re-time a video: report lengths again for it.
+                S.reportedDurations = {}
+            end if
+            qrChanged = prev <> invalid and prev.settings.qrTarget <> S.show.settings.qrTarget
+            moved = prev = invalid or prev.epochMs <> S.show.epochMs or prev.pausedAtMs <> S.show.pausedAtMs or prev.id <> S.show.id
+            return { type: "showChanged", playlist: true, moved: moved, qrChanged: qrChanged, cleared: false }
+        end if
+        if prev <> invalid and prev.id = incoming.id then
+            epoch = Util.num(incoming.epochMs, prev.epochMs)
+            paused = invalid
+            if Util.isNumber(incoming.pausedAtMs) then paused = Util.num(incoming.pausedAtMs)
+            moved = prev.epochMs <> epoch or SyncLogic.pausedDiffers(prev.pausedAtMs, paused)
+            if Util.isNumber(incoming.version) then prev.version = Int(incoming.version)
+            if Util.isString(incoming.sourceRef) then prev.sourceRef = incoming.sourceRef
+            prev.epochMs = epoch
+            prev.pausedAtMs = paused
+            if moved then return { type: "showChanged", playlist: false, moved: true, cleared: false }
+            return invalid
+        end if
+        ' A show we do not hold and no playlist with it: ask again for all of it.
+        S.forceFull = true
+        S.syncSoon = true
+        return invalid
+    end function
+
+    function pausedDiffers(a as dynamic, b as dynamic) as boolean
+        if a = invalid and b = invalid then return false
+        if a = invalid or b = invalid then return true
+        return a <> b
+    end function
+
+    ' A held show from a fully populated `show` object (sync or sample).
+    function showOf(incoming as object) as object
+        paused = invalid
+        if Util.isNumber(incoming.pausedAtMs) then paused = Util.num(incoming.pausedAtMs)
+        timeline = []
+        for each slot in incoming.timeline
+            if Util.isAA(slot) and Util.str(slot.id) <> invalid then
+                timeline.Push({ id: slot.id, ms: Util.num(slot.ms), estimated: slot.estimated = true })
+            end if
+        end for
+        items = []
+        byId = {}
+        for each item in incoming.items
+            if Util.isAA(item) and Util.str(item.id) <> invalid then
+                items.Push(item)
+                byId[item.id] = item
+            end if
+        end for
+        version = 0
+        if Util.isNumber(incoming.version) then version = Int(incoming.version)
+        return {
+            id: Util.strOr(incoming.id, "")
+            version: version
+            sourceRef: Util.str(incoming.sourceRef)
+            epochMs: Util.num(incoming.epochMs)
+            pausedAtMs: paused
+            settings: Prefs.resolve(incoming.settings)
+            items: items
+            timeline: timeline
+            byId: byId
+        }
+    end function
+
+    function takeoverOf(raw as dynamic) as dynamic
+        if not Util.isAA(raw) or not Util.isAA(raw.item) or Util.str(raw.item.id) = invalid then return invalid
+        return {
+            item: raw.item
+            settings: Prefs.resolve(raw.settings)
+            startedAt: Util.strOr(raw.startedAt, "")
+            startedAtMs: Iso.toMs(raw.startedAt)
+            until: Util.str(raw.until)
+            untilMs: Iso.toMs(raw.until)
+        }
+    end function
+
+    ' The takeover, unless its `until` has passed by the server clock.
+    function activeTakeover(S as object, nowServer as double) as dynamic
+        tk = S.takeover
+        if tk = invalid then return invalid
+        if tk.untilMs <> invalid and tk.untilMs <= nowServer then return invalid
+        return tk
+    end function
+
+    ' identify · reload · clear-cache, each once, in seq order. Unknown types
+    ' are acknowledged and otherwise ignored (SPEC §7).
+    function handleCommands(S as object, commands as object, nowLocal as double) as object
+        actions = []
+        sorted = []
+        for each c in commands
+            if Util.isAA(c) and Util.isNumber(c.seq) then sorted.Push(c)
+        end for
+        sorted.SortBy("seq")
+        acted = false
+        for each command in sorted
+            seq = Int(Util.num(command.seq))
+            if seq > S.ackSeq then
+                kind = Util.strOr(command.type, "")
+                if kind = "identify" then
+                    S.identifyUntil = nowLocal + 6000
+                    actions.Push({ type: "identify" })
+                else if kind = "reload" then
+                    S.show = invalid
+                    S.forceFull = true
+                    actions.Push({ type: "reload" })
+                else if kind = "clear-cache" then
+                    actions.Push({ type: "clearCache" })
+                end if
+                S.handledCommands.Unshift({ seq: seq, type: kind, at: nowLocal })
+                if S.handledCommands.Count() > 10 then S.handledCommands.Pop()
+                S.ackSeq = seq
+                acted = true
+            end if
+        end for
+        if acted then
+            actions.Push({ type: "saveAck", ackSeq: S.ackSeq })
+            ' Acknowledge promptly so the dashboard sees it done.
+            S.syncSoon = true
+        end if
+        return actions
+    end function
+
+    ' The first time a video's length is known, once per item per show version.
+    sub reportDuration(S as object, itemId as string, seconds as dynamic)
+        if not Util.isNumber(seconds) or seconds <= 0 or S.reportedDurations.DoesExist(itemId) then return
+        S.reportedDurations[itemId] = true
+        S.pendingDurations[itemId] = Int(seconds * 1000 + 0.5)
+    end sub
+
+end namespace

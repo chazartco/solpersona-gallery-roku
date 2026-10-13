@@ -1,0 +1,106 @@
+import "pkg:/source/lib/Util.bs"
+
+' Where things go on the wall, as plain arithmetic (SPEC §8 `fit`).
+'
+' Everything is measured in `u`: 1% of the screen's shorter side, as the
+' simulator does, so 720p and 1080p look the same. All rectangles are
+' { x, y, w, h } in UI pixels.
+
+namespace Geo
+
+    function unit(screenW as integer, screenH as integer) as float
+        return Util.min(screenW, screenH) / 100.0
+    end function
+
+    ' The largest rectangle of aspect w:h inside the box, centred.
+    function contain(boxX as float, boxY as float, boxW as float, boxH as float, w as float, h as float) as object
+        if w <= 0 or h <= 0 then
+            w = 16
+            h = 10
+        end if
+        scale = Util.min(boxW / w, boxH / h)
+        fw = Int(w * scale)
+        fh = Int(h * scale)
+        return { x: Int(boxX + (boxW - fw) / 2), y: Int(boxY + (boxH - fh) / 2), w: fw, h: fh }
+    end function
+
+    ' Frame metrics in pixels: the moulding around the mat, the mat around the piece.
+    function frameWidths(u as float, frameStyle as string) as object
+        moulding = 0
+        if frameStyle <> "NONE" then moulding = Int(u * 1.5 + 0.5)
+        return { moulding: moulding, mat: Int(u * 4 + 0.5) }
+    end function
+
+    ' The whole arrangement of a piece of bitmap size bw×bh under settings `s`:
+    '   piece     where the picture goes (FILL: the whole screen, cropped)
+    '   mat       FRAME: the mat rectangle (invalid otherwise)
+    '   moulding  FRAME: the moulding rectangle (invalid for NONE / other fits)
+    '   wash      BLUR: the cover-scaled wash, 1.15× the screen to hide soft edges
+    function arrange(screenW as integer, screenH as integer, s as object, bw as float, bh as float) as object
+        u = Geo.unit(screenW, screenH)
+        out = { piece: invalid, mat: invalid, moulding: invalid, wash: invalid, fill: false, u: u }
+        if s.fit = "FILL" then
+            out.piece = { x: 0, y: 0, w: screenW, h: screenH }
+            out.fill = true
+            return out
+        end if
+        margin = u * s.marginPercent
+        inset = 0
+        fw = invalid
+        if s.fit = "FRAME" then
+            fw = Geo.frameWidths(u, s.frameStyle)
+            inset = fw.moulding + fw.mat
+        end if
+        availW = Util.max(10, screenW - 2 * margin - 2 * inset)
+        availH = Util.max(10, screenH - 2 * margin - 2 * inset)
+        out.piece = Geo.contain(margin + inset, margin + inset, availW, availH, bw, bh)
+        if s.fit = "FRAME" then
+            p = out.piece
+            out.mat = { x: p.x - fw.mat, y: p.y - fw.mat, w: p.w + 2 * fw.mat, h: p.h + 2 * fw.mat }
+            if fw.moulding > 0 then
+                mt = out.mat
+                out.moulding = { x: mt.x - fw.moulding, y: mt.y - fw.moulding, w: mt.w + 2 * fw.moulding, h: mt.h + 2 * fw.moulding }
+            end if
+        end if
+        if s.fit = "BLUR" then
+            ww = Int(screenW * 1.15)
+            wh = Int(screenH * 1.15)
+            out.wash = { x: Int((screenW - ww) / 2), y: Int((screenH - wh) / 2), w: ww, h: wh }
+        end if
+        return out
+    end function
+
+    ' Top-left of a box of size w×h in a corner, 3.2u in from the edges.
+    function cornerAt(corner as string, screenW as integer, screenH as integer, w as float, h as float) as object
+        u = Geo.unit(screenW, screenH)
+        inset = Int(u * 3.2)
+        x = inset
+        y = inset
+        if corner = "TOP_RIGHT" or corner = "BOTTOM_RIGHT" then x = Int(screenW - inset - w)
+        if corner = "BOTTOM_LEFT" or corner = "BOTTOM_RIGHT" then y = Int(screenH - inset - h)
+        return [x, y]
+    end function
+
+    function isRight(corner as string) as boolean
+        return corner = "TOP_RIGHT" or corner = "BOTTOM_RIGHT"
+    end function
+
+    function isBottom(corner as string) as boolean
+        return corner = "BOTTOM_LEFT" or corner = "BOTTOM_RIGHT"
+    end function
+
+    ' The corner the sample's "Link this screen" card takes: one the label and
+    ' the code leave free (SPEC §11b).
+    function freeCorner(s as dynamic) as string
+        used = {}
+        if Util.isAA(s) then
+            if s.captionStyle <> "NONE" then used[s.captionCorner] = true
+            if s.qrTarget <> "NONE" then used[s.qrCorner] = true
+        end if
+        for each c in ["TOP_RIGHT", "TOP_LEFT", "BOTTOM_RIGHT", "BOTTOM_LEFT"]
+            if not used.DoesExist(c) then return c
+        end for
+        return "TOP_RIGHT"
+    end function
+
+end namespace

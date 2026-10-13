@@ -1,0 +1,349 @@
+import "pkg:/source/lib/Util.bs"
+
+' Requests (all carry `id` and `op`):
+'   fetch      { url, lane: "cache" | "kept" }  → { ok, path, bytes, status, network, url }
+'   pin        { urls }      cache files the LRU must not evict (what is on screen and due)
+'   clearCache { keep }      delete cached media except these URLs
+'   keptList   {}            → { files: { url: bytes } } from the stick's index
+'   keptPrune  { keep }      delete kept files not in `keep` (a new show version)
+'   keptReset  {}            delete everything kept
+'   writeText  { path, text }
+'
+' Streaming cache: cachefs:/ is RAM the OS may reclaim at any time and loses
+' at reboot, so a file is always checked before use; tmp:/ is the fallback.
+' Kept files live on ext1: (USB stick / SD card) when this model lets an app
+' write there — Roku documents USB as read-only, so it is probed, not assumed.
+
+sub init()
+    m.top.functionName = "runTask"
+end sub
+
+sub runTask()
+    m.fs = CreateObject("roFileSystem")
+    m.digest = CreateObject("roEVPDigest")
+    m.pinned = {}
+    m.lruSection = CreateObject("roRegistrySection", "solpersona-cache")
+    m.lru = loadLru()
+    m.top.storage = probeStorage()
+
+    port = CreateObject("roMessagePort")
+    m.top.ObserveField("request", port)
+    m.top.ObserveField("keepVolume", port)
+    m.fs.SetMessagePort(port)
+    inflight = {}
+    lastLruSave = Util.wallMs()
+    m.lruDirty = false
+    while true
+        msg = Wait(500, port)
+        kind = type(msg)
+        if kind = "roSGNodeEvent" then
+            if msg.GetField() = "request" then
+                req = msg.GetData()
+                if Util.isAA(req) then handle(req, port, inflight)
+            else if msg.GetField() = "keepVolume" then
+                m.top.storage = probeStorage()
+            end if
+        else if kind = "roUrlEvent" then
+            finishDownload(msg, inflight)
+        else if kind = "roFileSystemEvent" then
+            ' A stick put in or taken out: tell the scene what it can do now.
+            m.top.storage = probeStorage()
+        end if
+        now = Util.wallMs()
+        for each key in Util.keysOf(inflight)
+            job = inflight[key]
+            if now > job.deadline then
+                job.xfer.AsyncCancel()
+                inflight.Delete(key)
+                m.fs.Delete(job.part)
+                reply(job.req, { ok: false, status: 0, network: true, url: job.req.url })
+            end if
+        end for
+        if m.lruDirty and now - lastLruSave > 30000 then
+            saveLru()
+            lastLruSave = now
+        end if
+    end while
+end sub
+
+sub handle(req as object, port as object, inflight as object)
+    op = req.op
+    if op = "fetch" then
+        startDownload(req, port, inflight)
+    else if op = "pin" then
+        m.pinned = {}
+        if Util.isArray(req.urls) then
+            for each url in req.urls
+                m.pinned[nameFor(url)] = true
+            end for
+        end if
+    else if op = "clearCache" then
+        keep = {}
+        if Util.isArray(req.keep) then
+            for each url in req.keep
+                keep[nameFor(url)] = true
+            end for
+        end if
+        dir = m.top.storage.cacheDir
+        for each name in m.fs.GetDirectoryListing(dir)
+            if not keep.DoesExist(name) then
+                m.fs.Delete(dir + name)
+                m.lru.Delete(name)
+            end if
+        end for
+        m.lruDirty = true
+        reply(req, { ok: true })
+    else if op = "keptList" then
+        reply(req, { ok: true, files: readKeptIndex() })
+    else if op = "keptPrune" then
+        keep = {}
+        if Util.isArray(req.keep) then
+            for each url in req.keep
+                keep[url] = true
+            end for
+        end if
+        files = readKeptIndex()
+        for each url in Util.keysOf(files)
+            if not keep.DoesExist(url) then
+                m.fs.Delete(keptDir() + nameFor(url))
+                files.Delete(url)
+            end if
+        end for
+        writeKeptIndex(files)
+        reply(req, { ok: true, files: files })
+    else if op = "keptReset" then
+        dir = keptDir()
+        if m.fs.Exists(dir) then
+            for each name in m.fs.GetDirectoryListing(dir)
+                m.fs.Delete(dir + name)
+            end for
+        end if
+        writeKeptIndex({})
+        reply(req, { ok: true, files: {} })
+    else if op = "writeText" then
+        ok = WriteAsciiFile(req.path, req.text)
+        reply(req, { ok: ok })
+    end if
+end sub
+
+' --- Downloads ----------------------------------------------------------------
+
+sub startDownload(req as object, port as object, inflight as object)
+    kept = req.lane = "kept"
+    if kept then
+        dir = keptDir()
+    else
+        dir = m.top.storage.cacheDir
+    end if
+    name = nameFor(req.url)
+    path = dir + name
+    if m.fs.Exists(path) then
+        bytes = sizeOf(path)
+        if bytes > 0 then
+            if not kept then touch(name, bytes)
+            reply(req, { ok: true, path: path, bytes: bytes, url: req.url, cached: true })
+            return
+        end if
+        m.fs.Delete(path)
+    end if
+    if not kept then makeRoom()
+
+    xfer = CreateObject("roUrlTransfer")
+    xfer.SetMessagePort(port)
+    xfer.SetUrl(req.url)
+    if LCase(Left(req.url, 8)) = "https://" then
+        xfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
+        xfer.InitClientCertificates()
+    end if
+    ' Media never takes the token (SPEC §6.1); a CDN may redirect.
+    part = path + ".part"
+    if not xfer.AsyncGetToFile(part) then
+        reply(req, { ok: false, status: 0, network: true, url: req.url })
+        return
+    end if
+    ' Originals can be tens of megabytes; a stalled transfer is dropped after
+    ' three minutes and retried later by the scene.
+    inflight[xfer.GetIdentity().ToStr()] = { xfer: xfer, req: req, part: part, path: path, name: name, kept: kept, deadline: Util.wallMs() + 180000 }
+end sub
+
+sub finishDownload(msg as object, inflight as object)
+    key = msg.GetSourceIdentity().ToStr()
+    job = inflight[key]
+    if job = invalid or msg.GetInt() <> 1 then return
+    inflight.Delete(key)
+    code = msg.GetResponseCode()
+    if code < 200 or code >= 300 then
+        m.fs.Delete(job.part)
+        reply(job.req, { ok: false, status: Util.max(0, code), network: code <= 0, url: job.req.url })
+        return
+    end if
+    if not m.fs.Rename(job.part, job.path) then
+        ' Out of room, or the volume refused the write.
+        m.fs.Delete(job.part)
+        reply(job.req, { ok: false, status: code, network: false, url: job.req.url, full: true })
+        return
+    end if
+    bytes = sizeOf(job.path)
+    if job.kept then
+        files = readKeptIndex()
+        files[job.req.url] = bytes
+        writeKeptIndex(files)
+    else
+        touch(job.name, bytes)
+    end if
+    reply(job.req, { ok: true, path: job.path, bytes: bytes, url: job.req.url })
+end sub
+
+function sizeOf(path as string) as double
+    info = m.fs.Stat(path)
+    if Util.isAA(info) and Util.isNumber(info.size) then return Util.num(info.size)
+    return 0#
+end function
+
+' A stable file name for a URL: its MD5 plus the extension the decoder needs.
+function nameFor(url as string) as string
+    ba = CreateObject("roByteArray")
+    ba.FromAsciiString(url)
+    m.digest.Setup("md5")
+    hex = m.digest.Process(ba)
+    ext = Util.extensionOf(url)
+    if ext = "" then ext = "bin"
+    return hex + "." + ext
+end function
+
+' --- Streaming cache LRU ----------------------------------------------------------
+'
+' The index lives in the registry ({ name: [bytes, lastUsedSeconds] }) so it
+' survives an app restart; cachefs itself may be emptied by the OS, which is
+' why every hit is checked on disk first.
+
+function loadLru() as object
+    raw = m.lruSection.Read("lru")
+    if raw <> "" then
+        data = ParseJson(raw)
+        if Util.isAA(data) then return data
+    end if
+    return {}
+end function
+
+sub saveLru()
+    m.lruSection.Write("lru", FormatJson(m.lru))
+    m.lruSection.Flush()
+    m.lruDirty = false
+end sub
+
+sub touch(name as string, bytes as double)
+    m.lru[name] = [bytes, CreateObject("roDateTime").AsSeconds()]
+    m.lruDirty = true
+end sub
+
+' Evicts least-recently used files (never pinned ones) until the cache is
+' under budget, leaving room for one more large file.
+sub makeRoom()
+    budget = m.top.storage.cacheBudgetMb * 1048576#
+    total = 0#
+    names = []
+    for each name in m.lru
+        total += Util.num(m.lru[name][0])
+        names.Push({ name: name, t: m.lru[name][1] })
+    end for
+    if total < budget * 0.8 and m.lru.Count() < 150 then return
+    names.SortBy("t")
+    dir = m.top.storage.cacheDir
+    for each entry in names
+        if (total < budget * 0.8 and m.lru.Count() < 150) then exit for
+        if not m.pinned.DoesExist(entry.name) then
+            total -= Util.num(m.lru[entry.name][0])
+            m.fs.Delete(dir + entry.name)
+            m.lru.Delete(entry.name)
+            m.lruDirty = true
+        end if
+    end for
+end sub
+
+' --- Kept on the device (SPEC §11a) ---------------------------------------------
+
+function keptDir() as string
+    ext = Util.strOr(m.top.storage.ext, "ext1:")
+    return ext + "/solpersona/media/"
+end function
+
+function readKeptIndex() as object
+    st = m.top.storage
+    if st = invalid or st.extWritable <> true then return {}
+    raw = ReadAsciiFile(st.ext + "/solpersona/index.json")
+    if raw <> "" then
+        data = ParseJson(raw)
+        if Util.isAA(data) then
+            ' The index can be ahead of the disk (a pulled stick, a crash).
+            for each url in Util.keysOf(data)
+                if not m.fs.Exists(keptDir() + nameFor(url)) then data.Delete(url)
+            end for
+            return data
+        end if
+    end if
+    return {}
+end function
+
+sub writeKeptIndex(files as object)
+    st = m.top.storage
+    if st = invalid or st.extWritable <> true then return
+    WriteAsciiFile(st.ext + "/solpersona/index.json", FormatJson(files))
+end sub
+
+' --- What this Roku can do ---------------------------------------------------------
+
+function probeStorage() as object
+    out = { cacheDir: "tmp:/sp/", cacheBudgetMb: 48, ext: invalid, extWritable: false, extFreeMb: 0, extNote: "no USB stick or SD card" }
+    if m.fs.CreateDirectory("cachefs:/sp") or m.fs.Exists("cachefs:/sp") then
+        out.cacheDir = "cachefs:/sp/"
+        out.cacheBudgetMb = 160
+    else
+        m.fs.CreateDirectory("tmp:/sp")
+    end if
+
+    for each volume in m.fs.GetVolumeList()
+        if Left(LCase(volume), 3) = "ext" then
+            out.ext = volume
+            exit for
+        end if
+    end for
+    override = m.top.keepVolume
+    if override <> invalid and override <> "" then
+        out.ext = override
+        out.simulated = true
+    end if
+    if out.ext = invalid then return out
+
+    ' Writable on this model? Create, write and delete a probe file.
+    m.fs.CreateDirectory(out.ext + "/solpersona")
+    m.fs.CreateDirectory(out.ext + "/solpersona/media")
+    probe = out.ext + "/solpersona/.probe"
+    if WriteAsciiFile(probe, "solpersona") and ReadAsciiFile(probe) = "solpersona" then
+        m.fs.Delete(probe)
+        out.extWritable = true
+        out.extNote = "writable"
+    else
+        out.extNote = "read-only on this model"
+    end if
+
+    info = m.fs.GetVolumeInfo(out.ext)
+    if Util.isAA(info) and (info.DoesExist("free-blocks") or info.DoesExist("freeblocks")) then
+        free = Util.num(info["free-blocks"], Util.num(info.freeblocks))
+        size = Util.num(info.blocksize, 512)
+        out.extFreeMb = Int(free * size / 1048576#)
+        if Util.str(info.label) <> invalid then out.extLabel = info.label
+    else
+        ' The volume does not say how much room it has: assume a modest
+        ' amount; a write that fails for room is caught and reported anyway.
+        out.extFreeMb = 512
+        out.extNote = out.extNote + ", free space unknown"
+    end if
+    return out
+end function
+
+sub reply(req as object, out as object)
+    out.id = req.id
+    out.op = req.op
+    m.top.response = out
+end sub

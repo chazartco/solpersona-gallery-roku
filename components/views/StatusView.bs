@@ -1,0 +1,53 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/components/ui/Ui.bs"
+
+sub init()
+    Ui.makePoster(m.top, "pkg:/images/ui/bg-screen.jpg", 0, 0, Ui.SCREEN_W, Ui.SCREEN_H)
+    Ui.makeWordmark(m.top)
+    m.block = m.top.CreateChild("Group")
+    m.block.id = "block"
+    m.inner = m.block.CreateChild("Group")
+    m.burnAnim = m.top.FindNode("burnAnim")
+    m.burnInterp = m.top.FindNode("burnInterp")
+    onChange()
+end sub
+
+sub onChange()
+    Ui.clear(m.inner)
+    w = 1400
+    y = 0
+    if m.top.mode = "unlicensed" then
+        title = Ui.makeLabel(m.inner, Ui.SERIF, 46, Ui.INK, "This screen isn't active on your account yet.", { width: w, align: "center", wrap: true, maxLines: 2 })
+        y += Ui.sizeOf(title).h + 22
+        body = Ui.makeLabel(m.inner, Ui.SANS, 22, "0xECE9E3C8", "The account owner can manage their screens at " + m.top.host + ".", { width: w, align: "center", wrap: true, maxLines: 2, y: y })
+        y += Ui.sizeOf(body).h + 43
+        who = m.top.name
+        if m.top.owner <> "" then who = who + " · @" + m.top.owner
+        if who <> "" then
+            line = Ui.makeLabel(m.inner, Ui.SANS, 18, Ui.INK_FAINT, who, { width: w, align: "center", y: y })
+            y += Ui.sizeOf(line).h
+        end if
+    else
+        clock = Ui.makeLabel(m.inner, Ui.SERIF_LIGHT, 140, "0xECE9E3EB", m.top.clock, { width: w, align: "center" })
+        y += Ui.sizeOf(clock).h + 30
+        ready = "Ready"
+        if m.top.mode = "connecting" then ready = "Connecting"
+        r = Ui.makeLabel(m.inner, Ui.SANS_BOLD, 18, Ui.ACCENT, UCase(ready), { width: w, align: "center", y: y })
+        y += Ui.sizeOf(r).h + 15
+        if m.top.name <> "" then
+            n = Ui.makeLabel(m.inner, Ui.SERIF, 37, Ui.INK, m.top.name, { width: w, align: "center", y: y })
+            y += Ui.sizeOf(n).h + 9
+        end if
+        if m.top.owner <> "" then
+            o = Ui.makeLabel(m.inner, Ui.SANS, 19, Ui.INK_FAINT, "@" + m.top.owner, { width: w, align: "center", y: y })
+            y += Ui.sizeOf(o).h
+        end if
+    end if
+    m.inner.translation = [Int((Ui.SCREEN_W - w) / 2), Int((Ui.SCREEN_H - y) / 2)]
+end sub
+
+sub onBurn()
+    m.burnAnim.control = "stop"
+    m.burnInterp.keyValue = [m.block.translation, m.top.burnOffset]
+    m.burnAnim.control = "start"
+end sub

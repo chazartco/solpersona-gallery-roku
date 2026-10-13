@@ -1,0 +1,427 @@
+' The renderer and the tick — simulator sections 6 and 7.
+'
+' Two layers, A and B. The front one is on the wall; the next piece is built
+' in the other and brought up by the transition (FADE through black,
+' DISSOLVE, CUT). A piece is only ever built from a cache entry that has
+' finished loading, and only faded up once its layer has decoded it.
+'
+' Every 250 ms the tick recomputes the position from the clock: nothing is
+' scheduled, so pause, next, jump and a new epoch are simply a different
+' answer on the next tick.
+'
+' Screens in step (CONFORMANCE §C, within ~150 ms): in the last seconds of a
+' slot the next piece is built into the back layer ahead of time, and a
+' one-shot timer fires the tick at the boundary itself, so the change starts
+' on the frame the clock says — not up to a tick late, nor after a decode.
+
+const PREPARE_AHEAD_MS = 2500
+
+sub initRender()
+    m.layersGroup = m.top.FindNode("layers")
+    m.layers = [makeLayerState("layerA", "fadeA", "fadeAInterp"), makeLayerState("layerB", "fadeB", "fadeBInterp")]
+    m.front = 0
+    m.transition = invalid
+    m.pendingShow = invalid
+    m.prepared = invalid
+    m.target = invalid
+    m.loadingOn = false
+    m.lastClock = ""
+    m.boundaryAt = 0
+    m.boundaryTimer = m.top.FindNode("boundaryTimer")
+    m.boundaryTimer.ObserveField("fire", "tick")
+end sub
+
+function makeLayerState(nodeId as string, animId as string, interpId as string) as object
+    L = { node: m.top.FindNode(nodeId), anim: m.top.FindNode(animId), interp: m.top.FindNode(interpId) }
+    resetLayerState(L)
+    return L
+end function
+
+sub resetLayerState(L as object)
+    L.key = invalid
+    L.entryKey = invalid
+    L.itemId = invalid
+    L.index = invalid
+    L.target = invalid
+    L.settings = invalid
+    L.isVideo = false
+    L.takeover = false
+    L.filmStarted = false
+    L.filmUrl = invalid
+    L.playEnded = false
+    L.estimated = false
+    L.clockSig = ""
+    L.holdSince = 0
+    L.lastSeek = 0
+    L.qrKey = invalid
+    L.captionShown = true
+    L.durationMs = invalid
+end sub
+
+sub tick()
+    try
+        tickNow()
+    catch e
+        noteFailure("tick", e)
+    end try
+end sub
+
+sub tickNow()
+    nowLocal = monoNow()
+    identifying = m.S.identifyUntil > nowLocal and m.mode = "player"
+    if identifying <> m.views.identify.active then
+        if identifying and m.S.deviceInfo <> invalid then m.views.identify.name = m.S.deviceInfo.name
+        m.views.identify.active = identifying
+    end if
+    sample = m.mode = "sample"
+    setOffline((m.mode = "player" or sample) and not m.S.online)
+    ' The sample plays through exactly the same path as a show.
+    if m.mode <> "player" and not sample then return
+
+    if m.transition <> invalid and nowLocal >= m.transition.until then finishTransition()
+
+    now = serverNow()
+    target = Planner.target(m.S, now)
+    m.target = target
+
+    ' Opening hours (the show's). A takeover is somebody asking for this piece
+    ' now, so it is shown whatever the hour (SPEC §8).
+    schedule = invalid
+    if m.S.show <> invalid then schedule = m.S.show.settings.schedule
+    blackout = not (target <> invalid and target.takeover) and not Hours.isOpen(schedule, Util.localMinutesAt(now))
+    setBlackout(blackout, now, schedule)
+
+    if sample then
+        showScreen("")
+        paintSampleCard()
+    else if m.S.status = "UNLICENSED" then
+        showScreen("unlicensed")
+    else if target = invalid then
+        if m.S.status = invalid then showScreen("connecting") else showScreen("idle")
+    else
+        showScreen("")
+    end if
+    paintStatusText()
+
+    manageCache(now)
+
+    if m.pendingShow <> invalid then
+        p = m.layers[m.pendingShow.idx]
+        if p.node.ready or p.node.failed or nowLocal - m.pendingShow.since > 4000 then startTransition()
+        return
+    end if
+
+    cur = m.layers[m.front]
+    if target = invalid then
+        m.holding = invalid
+        discardPrepared()
+        setLoading(sample)
+        fadeOutFront()
+        return
+    end if
+    if cur.key = target.key then
+        syncPlayback(cur, target, nowLocal)
+        updateCaption(cur, target)
+        m.holding = invalid
+        setLoading(false)
+        prepareNext(target, now, nowLocal)
+        return
+    end if
+    if m.transition <> invalid then return
+    if cur.key <> invalid and Planner.shouldHoldVideo(cur, target, Planner.clockSig(m.S), nowLocal) then
+        m.holding = "letting the video finish"
+        return
+    end if
+
+    ' Never transition to a piece that has not loaded: hold the current one.
+    ' On a slow connection the wall falls behind for a slot, then joins the
+    ' clock where the clock is (SPEC §11a).
+    entry = m.cache[entryKeyFor(target.item, target.settings)]
+    if entry = invalid or entry.status <> "ready" then
+        if entry <> invalid and entry.status = "error" then
+            m.holding = "next piece failed to load"
+        else
+            m.holding = "loading the next piece"
+        end if
+        ' Nothing on the wall yet and no network (a restart while offline):
+        ' the calm "Connecting" screen rather than a dot on black.
+        if cur.key = invalid and not m.S.online and not sample then showScreen("connecting")
+        setLoading(cur.key = invalid and m.S.online)
+        return
+    end if
+    m.holding = invalid
+    if m.S.lastError <> invalid and Left(m.S.lastError, 14) = "could not load" then m.S.lastError = invalid
+    setLoading(false)
+    if m.prepared <> invalid and m.prepared.key = target.key then
+        ' Built ahead of the boundary: change now.
+        L = m.layers[m.prepared.idx]
+        L.target = target
+        m.pendingShow = { idx: m.prepared.idx, since: m.prepared.since }
+        m.prepared = invalid
+        if L.node.ready or L.node.failed then startTransition()
+        return
+    end if
+    discardPrepared()
+    showPiece(target, entry)
+end sub
+
+' In the last seconds of a slot: build what comes next into the back layer,
+' and wake the tick exactly at the boundary.
+sub prepareNext(target as object, now as double, nowLocal as double)
+    if target.paused or target.takeover or target.slotMs = invalid or m.transition <> invalid or m.blackout then return
+    remaining = target.slotMs - target.offsetMs
+    if remaining > PREPARE_AHEAD_MS or remaining < 0 then return
+    if Abs(m.boundaryAt - (nowLocal + remaining)) > 30 then
+        m.boundaryAt = nowLocal + remaining
+        m.boundaryTimer.control = "stop"
+        m.boundaryTimer.duration = Util.max(0.01, remaining / 1000.0)
+        m.boundaryTimer.control = "start"
+    end if
+    if m.prepared <> invalid then return
+    upcoming = Planner.target(m.S, now + remaining + 5)
+    if upcoming = invalid or upcoming.key = target.key then return
+    e = m.cache[entryKeyFor(upcoming.item, upcoming.settings)]
+    if e = invalid or e.status <> "ready" then return
+    idx = 1 - m.front
+    L = m.layers[idx]
+    clearLayer(L)
+    buildLayer(L, upcoming, e)
+    m.prepared = { idx: idx, key: upcoming.key, since: nowLocal }
+end sub
+
+sub discardPrepared()
+    if m.prepared = invalid then return
+    L = m.layers[m.prepared.idx]
+    m.prepared = invalid
+    clearLayer(L)
+end sub
+
+' Builds `target` into the back layer; the fade starts once it has decoded.
+sub showPiece(target as object, entry as object)
+    idx = 1 - m.front
+    L = m.layers[idx]
+    clearLayer(L)
+    buildLayer(L, target, entry)
+    m.pendingShow = { idx: idx, since: monoNow() }
+    p = m.layers[idx]
+    if p.node.ready or p.node.failed then startTransition()
+end sub
+
+sub buildLayer(L as object, target as object, entry as object)
+    item = target.item
+    s = target.settings
+    washUri = ""
+    if s.fit = "BLUR" then
+        ' For a video, the wash is its display ?? poster (SPEC §8).
+        washUri = entry.file
+        if washUri = "" then washUri = Util.strOr(MediaPick.stillOf(item), "")
+    end if
+    artist = ""
+    if Util.isAA(item.artist) then artist = Util.strOr(item.artist.name, "")
+    year = ""
+    if Util.isNumber(item.year) and item.year > 0 then year = Str(item.year).Trim()
+    captionShown = captionVisible(s, target)
+    L.node.opacity = 0
+    L.node.qrUri = ""
+    L.node.spec = {
+        settings: s
+        uri: entry.file
+        washUri: washUri
+        bw: entry.w
+        bh: entry.h
+        title: Util.strOr(item.title, "")
+        artist: artist
+        year: year
+        description: Util.strOr(item.description, "")
+        qr: s.qrTarget <> "NONE"
+        captionShown: captionShown
+        burn: m.burn
+    }
+    L.key = target.key
+    L.entryKey = entry.key
+    L.itemId = item.id
+    L.index = target.index
+    L.target = target
+    L.settings = s
+    L.takeover = target.takeover
+    L.isVideo = entry.kind = "VIDEO" and entry.filmUrls.Count() > 0 and not entry.stillFallback
+    L.filmStarted = false
+    L.playEnded = false
+    L.estimated = target.estimated
+    L.clockSig = Planner.clockSig(m.S)
+    L.holdSince = 0
+    L.lastSeek = 0
+    L.captionShown = captionShown
+    L.durationMs = entry.durationMs
+    if s.qrTarget <> "NONE" then L.qrKey = item.id + "|" + s.qrTarget else L.qrKey = invalid
+    paintQr()
+end sub
+
+sub startTransition()
+    p = m.pendingShow
+    m.pendingShow = invalid
+    if p = invalid then return
+    outIdx = m.front
+    cur = m.layers[outIdx]
+    nl = m.layers[p.idx]
+    s = nl.settings
+    mode = s.transition
+    T = 0
+    if mode <> "CUT" then T = s.transitionMs
+    if cur.key = invalid and mode <> "CUT" then mode = "FADE" ' from nothing: a fade up from black
+
+    ' The new layer goes on top.
+    m.layersGroup.RemoveChild(nl.node)
+    m.layersGroup.AppendChild(nl.node)
+    ' A film plays on the video plane, under the graphics, and does not fade
+    ' with its layer: it stops, and its still fades out instead.
+    if cur.isVideo then stopFilm()
+    m.front = p.idx
+
+    if T <= 0 then
+        nl.node.opacity = 1
+        m.transition = { outgoing: outIdx, until: 0, fadeOut: false }
+        finishTransition()
+        return
+    end if
+    if mode = "DISSOLVE" or cur.key = invalid then
+        ease = "inOutQuad"
+        if cur.key = invalid then ease = "outQuad"
+        animateLayer(nl, 0, 1, T, 0, ease)
+    else
+        ' FADE through black: down for half, up for half.
+        half = Int(T / 2)
+        animateLayer(cur, 1, 0, half, 0, "inQuad")
+        animateLayer(nl, 0, 1, half, half, "outQuad")
+    end if
+    m.transition = { outgoing: outIdx, until: monoNow() + T + 60, fadeOut: false }
+end sub
+
+sub animateLayer(L as object, fromValue as float, toValue as float, ms as integer, delayMs as integer, ease as string)
+    L.anim.control = "stop"
+    L.interp.keyValue = [fromValue, toValue]
+    L.anim.duration = Util.max(0.01, ms / 1000.0)
+    L.anim.delay = delayMs / 1000.0
+    L.anim.easeFunction = ease
+    L.node.opacity = fromValue
+    L.anim.control = "start"
+end sub
+
+sub finishTransition()
+    t = m.transition
+    m.transition = invalid
+    if t = invalid then return
+    front = m.layers[m.front]
+    if t.fadeOut then
+        clearLayer(front)
+        return
+    end if
+    front.anim.control = "stop"
+    front.node.opacity = 1
+    if t.outgoing <> m.front then clearLayer(m.layers[t.outgoing])
+    if front.isVideo and not front.filmStarted then startFilm(m.front)
+end sub
+
+sub clearLayer(L as object)
+    if m.filmLayer <> invalid and m.layers[m.filmLayer].node.IsSameNode(L.node) then stopFilm()
+    L.anim.control = "stop"
+    L.node.opacity = 0
+    L.node.spec = {}
+    L.node.qrUri = ""
+    resetLayerState(L)
+end sub
+
+sub clearLayers()
+    m.transition = invalid
+    m.pendingShow = invalid
+    m.prepared = invalid
+    for each L in m.layers
+        clearLayer(L)
+    end for
+end sub
+
+' Takes the wall to nothing (idle, unlicensed).
+sub fadeOutFront()
+    cur = m.layers[m.front]
+    if cur.key = invalid or m.transition <> invalid then return
+    if cur.isVideo then stopFilm()
+    animateLayer(cur, cur.node.opacity, 0, 600, 0, "linear")
+    m.transition = { outgoing: m.front, until: monoNow() + 650, fadeOut: true }
+end sub
+
+' captionTiming START: up for the first ~8 s of each piece, then it fades.
+function captionVisible(s as object, target as object) as boolean
+    return not (s.captionTiming = "START" and target.offsetMs > 8000)
+end function
+
+sub updateCaption(L as object, target as object)
+    shown = captionVisible(L.settings, target)
+    if shown <> L.captionShown then
+        L.captionShown = shown
+        L.node.captionShown = shown
+    end if
+end sub
+
+sub setBlackout(on as boolean, now as double, schedule as dynamic)
+    if on <> m.blackout then
+        m.blackout = on
+        m.views.blackout.visible = on
+        if on then pauseFilmForBlackout()
+    end if
+    showClock = on and m.config.debug
+    m.views.blackoutClock.visible = showClock
+    if showClock then
+        text = "closed · " + Util.localHhmmss(now)
+        if Util.isAA(schedule) then text = text + " · open " + schedule["on"] + "–" + schedule["off"]
+        m.views.blackoutClock.text = text
+    end if
+end sub
+
+sub setLoading(on as boolean)
+    if on = m.loadingOn then return
+    m.loadingOn = on
+    if on then
+        m.loadingAnim.control = "start"
+    else
+        m.loadingAnim.control = "stop"
+        m.views.loading.opacity = 0
+    end if
+end sub
+
+' A small, unobtrusive dot while playing by the last clock (SPEC §4.3).
+sub setOffline(on as boolean)
+    if on = m.offlineShown then return
+    m.offlineShown = on
+    m.offlineAnim.control = "stop"
+    if on then
+        m.offlineInterp.keyValue = [m.views.offline.opacity, 0.85]
+    else
+        m.offlineInterp.keyValue = [m.views.offline.opacity, 0.0]
+    end if
+    m.offlineAnim.control = "start"
+end sub
+
+' Idle: the time, "Ready", the screen's name and @owner (SPEC §4.2).
+sub paintStatusText()
+    view = m.views.status
+    info = m.S.deviceInfo
+    name = ""
+    owner = ""
+    if info <> invalid then
+        name = Util.strOr(info.name, "")
+        owner = Util.strOr(info.owner, "")
+    end if
+    if view.name <> name then view.name = name
+    if view.owner <> owner then view.owner = owner
+    host = Util.hostOf(m.config.baseUrl)
+    if view.host <> host then view.host = host
+end sub
+
+sub paintIdleClock()
+    if not m.views.status.visible then return
+    text = Util.localHhmm(serverNow())
+    if text <> m.lastClock then
+        m.lastClock = text
+        m.views.status.clock = text
+    end if
+end sub

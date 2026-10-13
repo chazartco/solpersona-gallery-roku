@@ -1,0 +1,30 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/components/ui/Ui.bs"
+
+sub init()
+    m.who = m.top.FindNode("who")
+    m.subtitle = m.top.FindNode("sub")
+    m.pulse = m.top.FindNode("pulse")
+    m.who.font = Ui.makeFont(Ui.SERIF, 119)
+    m.subtitle.font = Ui.makeFont(Ui.SANS_BOLD, 22)
+    m.top.visible = false
+end sub
+
+sub onName()
+    name = m.top.name
+    if name = "" then name = "This screen"
+    m.who.text = name
+    h = Ui.sizeOf(m.who).h
+    top = Int((Ui.SCREEN_H - h - 26 - 30) / 2)
+    m.who.translation = [100, top]
+    m.subtitle.translation = [0, top + h + 26]
+end sub
+
+sub onActive()
+    m.top.visible = m.top.active
+    if m.top.active then
+        m.pulse.control = "start"
+    else
+        m.pulse.control = "stop"
+    end if
+end sub

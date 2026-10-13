@@ -1,0 +1,284 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Clock.bs"
+import "pkg:/source/lib/Hours.bs"
+import "pkg:/source/lib/Prefs.bs"
+import "pkg:/source/lib/MediaPick.bs"
+import "pkg:/source/lib/SyncLogic.bs"
+import "pkg:/source/lib/PairLogic.bs"
+import "pkg:/source/lib/Planner.bs"
+import "pkg:/source/lib/Geo.bs"
+import "pkg:/components/ui/Ui.bs"
+import "pkg:/components/scene/Store.bs"
+import "pkg:/components/scene/Requests.bs"
+import "pkg:/components/scene/Pairing.bs"
+import "pkg:/components/scene/Sample.bs"
+import "pkg:/components/scene/Sync.bs"
+import "pkg:/components/scene/Cache.bs"
+import "pkg:/components/scene/Kept.bs"
+import "pkg:/components/scene/Render.bs"
+import "pkg:/components/scene/Film.bs"
+import "pkg:/components/scene/Keys.bs"
+import "pkg:/components/scene/Debug.bs"
+
+' Boot: read what this screen keeps (SPEC §11 "Settings the app itself
+' keeps"), start the two tasks, and go straight into the last state —
+' pairing, or playing — with no menus on the way.
+
+const APP_PLATFORM = "roku"
+const PRODUCTION_BASE = "https://solpersona.com"
+
+sub init()
+    m.mono = Clock.createMono()
+    m.appVersion = appVersionText()
+    m.config = loadConfig()
+    m.device = loadDevice(m.config.baseUrl)
+
+    m.S = SyncLogic.create()
+    if m.device <> invalid then m.S.ackSeq = m.device.ackSeq
+    m.P = PairLogic.create()
+    m.log = PlayLog.create()
+    m.mode = "boot"
+    m.blackout = false
+    m.syncing = false
+    m.nextSyncAt = invalid
+    m.pairRun = 0
+    m.sampleRun = 0
+    m.pairNext = ""
+    m.storage = { cacheDir: "tmp:/sp/", cacheBudgetMb: 48, ext: invalid, extWritable: false, extFreeMb: 0, extNote: "probing" }
+    m.caps = computeCaps()
+    m.burn = [0, 0]
+    m.callLog = []
+    m.launched = false
+
+    m.views = {
+        pairing: m.top.FindNode("pairing")
+        status: m.top.FindNode("status")
+        sampleCard: m.top.FindNode("sampleCard")
+        blackout: m.top.FindNode("blackout")
+        blackoutClock: m.top.FindNode("blackoutClock")
+        identify: m.top.FindNode("identify")
+        offline: m.top.FindNode("offline")
+        loading: m.top.FindNode("loading")
+        debug: m.top.FindNode("debug")
+        menu: m.top.FindNode("menu")
+    }
+    m.views.blackoutClock.font = Ui.makeFont(Ui.MONO_REGULAR, 13)
+    m.loadingAnim = m.top.FindNode("loadingAnim")
+    m.offlineAnim = m.top.FindNode("offlineAnim")
+    m.offlineInterp = m.top.FindNode("offlineInterp")
+    m.offlineShown = false
+    m.views.debug.visible = m.config.debug
+
+    initRequests()
+    initCache()
+    initKept()
+    initRender()
+    initFilm()
+    initKeys()
+
+    m.syncTimer = m.top.FindNode("syncTimer")
+    m.syncTimer.ObserveField("fire", "syncOnce")
+    m.pairTimer = m.top.FindNode("pairTimer")
+    m.pairTimer.ObserveField("fire", "onPairTimer")
+    m.sampleTimer = m.top.FindNode("sampleTimer")
+    m.sampleTimer.ObserveField("fire", "onSampleTimer")
+    m.tickTimer = m.top.FindNode("tickTimer")
+    m.tickTimer.ObserveField("fire", "tick")
+    m.tickTimer.control = "start"
+    m.secondTimer = m.top.FindNode("secondTimer")
+    m.secondTimer.ObserveField("fire", "everySecond")
+    m.secondTimer.control = "start"
+    m.burnTimer = m.top.FindNode("burnTimer")
+    m.burnTimer.ObserveField("fire", "burnInShift")
+    m.burnTimer.control = "start"
+
+    m.top.ObserveField("launchArgs", "onLaunchArgs")
+    m.top.SetFocus(true)
+    if m.device <> invalid then
+        startPlayer()
+    else
+        startPairing()
+    end if
+end sub
+
+' Development only: a sideloaded build accepts `baseUrl` as a launch
+' parameter (curl -d '' "http://<roku>:8060/launch/dev?baseUrl=http://…").
+' A store build ignores it — anyone on the network can send launch
+' parameters, and re-pointing a screen would unlink it from its account.
+sub onLaunchArgs()
+    args = m.top.launchArgs
+    if not Util.isAA(args) or not CreateObject("roAppInfo").IsDev() then return
+    ' keepVolume=cachefs: makes that volume stand in for a USB stick, to
+    ' exercise "Keep this gallery on the screen" without one (not persistent).
+    keepVolume = Util.str(args.keepVolume)
+    if keepVolume <> invalid then m.media.keepVolume = keepVolume
+    base = Util.str(args.baseUrl)
+    if base = invalid then return
+    lower = LCase(base)
+    if Left(lower, 7) = "http://" or Left(lower, 8) = "https://" then changeBase(base)
+end sub
+
+function appVersionText() as string
+    info = CreateObject("roAppInfo")
+    return info.GetVersion()
+end function
+
+' --- What the app keeps ----------------------------------------------------------------
+
+function loadConfig() as object
+    cfg = {
+        baseUrl: Util.trimSlashes(storeRead("baseUrl"))
+        name: storeRead("name")
+        debug: storeRead("debug") = "1"
+        keepAwake: storeRead("keepAwake") <> "0"
+    }
+    if cfg.baseUrl = "" then cfg.baseUrl = PRODUCTION_BASE
+    return cfg
+end function
+
+' The screen's credential belongs to the SolPersona that issued it.
+function loadDevice(baseUrl as string) as dynamic
+    token = storeRead("token")
+    if token = "" or storeRead("tokenBase") <> baseUrl then return invalid
+    ack = 0
+    raw = storeRead("ackSeq")
+    if raw <> "" then ack = Val(raw, 10)
+    return { token: token, deviceId: storeRead("deviceId"), baseUrl: baseUrl, ackSeq: ack }
+end function
+
+sub saveConfig()
+    storeWrite("baseUrl", m.config.baseUrl)
+    storeWrite("name", m.config.name)
+    if m.config.debug then storeWrite("debug", "1") else storeWrite("debug", "0")
+    if m.config.keepAwake then storeWrite("keepAwake", "1") else storeWrite("keepAwake", "0")
+end sub
+
+' --- Capabilities (SPEC §3.1) ------------------------------------------------------------
+
+function computeCaps() as object
+    info = CreateObject("roDeviceInfo")
+    size = panelSize(info)
+    persistent = m.storage.extWritable = true
+    storageMb = m.storage.cacheBudgetMb
+    if persistent then storageMb = Int(Util.min(10000000, m.storage.extFreeMb + keptMegabytes()))
+    return {
+        screenWidth: size.w
+        screenHeight: size.h
+        storageMb: storageMb
+        video: true
+        originals: canHoldOriginals(info)
+        persistentStorage: persistent
+    }
+end function
+
+' The panel's real pixels, not the UI resolution: SceneGraph draws at most
+' 1920×1080, but the video mode says what the TV is fed (e.g. "2160p60").
+function panelSize(info as object) as object
+    mode = LCase(info.GetVideoMode())
+    if Left(mode, 4) = "2160" then return { w: 3840, h: 2160 }
+    if Left(mode, 4) = "1080" then return { w: 1920, h: 1080 }
+    if Left(mode, 3) = "720" then return { w: 1280, h: 720 }
+    if Left(mode, 3) = "480" or Left(mode, 3) = "576" then return { w: 720, h: Val(Left(mode, 3), 10) }
+    d = info.GetDisplaySize()
+    return { w: Int(d.w), h: Int(d.h) }
+end function
+
+' Room to decode an original at screen size (SPEC §6.2 AUTO). The OpenGL
+' platforms decode large JPEGs with downscaling; the old DirectFB ones are
+' short of texture memory and keep to the display copies.
+function canHoldOriginals(info as object) as boolean
+    if LCase(info.GetGraphicsPlatform()) <> "opengl" then return false
+    mem = CreateObject("roAppMemoryMonitor")
+    if mem = invalid then return true
+    available = mem.GetChannelAvailableMemory()
+    if Util.isNumber(available) and available > 0 and available < 120 * 1024 then return false
+    return true
+end function
+
+' --- Modes ----------------------------------------------------------------------------------
+
+' Which full-screen state is up: "pairing" | "idle" | "connecting" | "unlicensed" | "".
+sub showScreen(name as string)
+    m.views.pairing.visible = name = "pairing"
+    statusMode = name = "idle" or name = "connecting" or name = "unlicensed"
+    m.views.status.visible = statusMode
+    if statusMode and m.views.status.mode <> name then m.views.status.mode = name
+    if not m.launched and name <> "" then
+        ' Certification: tell the OS the first screen is up.
+        m.launched = true
+        m.top.SignalBeacon("AppLaunchComplete")
+    end if
+end sub
+
+' The credential stopped working (removed from the dashboard), or was forgotten.
+sub unlinkLocally()
+    m.device = invalid
+    storeDelete("token")
+    storeDelete("tokenBase")
+    storeDelete("deviceId")
+    storeDelete("ackSeq")
+    storeDelete("snapshot")
+    m.api.token = ""
+    dropKept()
+    m.S = SyncLogic.create()
+    m.log = PlayLog.create()
+    startPairing()
+end sub
+
+' "Forget this account" (SPEC §10): tell SolPersona, then unlink here whatever it says.
+sub forgetScreen()
+    if m.device = invalid then
+        unlinkLocally()
+        return
+    end if
+    apiSend("forget", "DELETE", "/api/v1/device", "", true, {})
+end sub
+
+' A different SolPersona: the credential, the code and anything kept belong to the old one.
+sub changeBase(base as string)
+    base = Util.trimSlashes(base)
+    if base = "" then base = PRODUCTION_BASE
+    if base = m.config.baseUrl then return
+    m.config.baseUrl = base
+    saveConfig()
+    m.api.baseUrl = base
+    storeDelete("pairing")
+    unlinkLocally()
+end sub
+
+' --- Timers ----------------------------------------------------------------------------------
+
+sub everySecond()
+    logOfflinePlay()
+    paintPairingCountdown()
+    paintIdleClock()
+    if m.config.debug then renderDebug()
+    flushPinned()
+end sub
+
+' burnInGuard: the label, the code and the idle block drift a few pixels
+' every two minutes (OLED care).
+sub burnInShift()
+    on = true
+    t = m.target
+    if t <> invalid then on = t.settings.burnInGuard
+    range = 0.6 * Ui.UNIT
+    if on then
+        m.burn = [Int((Rnd(0) * 2 - 1) * range), Int((Rnd(0) * 2 - 1) * range)]
+    else
+        m.burn = [0, 0]
+    end if
+    for each layer in m.layers
+        if layer.key <> invalid then layer.node.burnOffset = m.burn
+    end for
+    m.views.status.burnOffset = m.burn
+end sub
+
+function monoNow() as double
+    return Clock.monoNow(m.mono)
+end function
+
+' Server time by our clock: local monotonic time + the median offset (SPEC §5.1).
+function serverNow() as double
+    return Clock.monoNow(m.mono) + m.S.clock.offset
+end function

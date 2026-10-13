@@ -1,0 +1,163 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Clock.bs"
+import "pkg:/source/lib/Hours.bs"
+import "pkg:/source/lib/MediaPick.bs"
+
+' docs/solpersona/test-vectors.json, read from the package as-is: the same
+' file SolPersona checks its own clock against, so a port that passes these
+' agrees with the server (CONFORMANCE.md §A).
+namespace tests
+
+    @SGNode("Group")
+    @suite("Shared test vectors")
+    class VectorTests extends rooibos.BaseTestSuite
+
+        private vectors
+
+        protected override function setup()
+            m.vectors = ParseJson(ReadAsciiFile("pkg:/tests/test-vectors.json"))
+        end function
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("positionAt")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        @it("loads the vectors")
+        function _()
+            m.assertNotInvalid(m.vectors)
+            m.assertTrue(m.vectors.positionAt.Count() >= 7)
+        end function
+
+        @it("reproduces every positionAt case")
+        function _()
+            for each v in m.vectors.positionAt
+                actual = Clock.positionAt(v.timeline, v.clock, Util.num(v.nowMs))
+                if v.expect = invalid then
+                    m.assertInvalid(actual, v.name)
+                else
+                    m.assertNotInvalid(actual, v.name)
+                    m.assertEqual(Util.num(actual.index), Util.num(v.expect.index), v.name + ": index")
+                    m.assertEqual(Util.num(actual.offsetMs), Util.num(v.expect.offsetMs), v.name + ": offsetMs")
+                    m.assertEqual(Util.num(actual.lap), Util.num(v.expect.lap), v.name + ": lap")
+                end if
+            end for
+        end function
+
+        @it("keeps millisecond precision at real epoch times")
+        function _()
+            timeline = [{ id: "a", ms: 30000 }, { id: "b", ms: 21000 }]
+            clockState = { epochMs: 1760289000000#, pausedAtMs: invalid }
+            p = Clock.positionAt(timeline, clockState, 1760289000000# + 51000# * 1000 + 30001)
+            m.assertEqual(Util.num(p.index), 1#)
+            m.assertEqual(Util.num(p.offsetMs), 1#)
+            m.assertEqual(Util.num(p.lap), 1000#)
+        end function
+
+        @it("treats a timeline of zero length as nothing to play")
+        function _()
+            m.assertInvalid(Clock.positionAt([{ id: "a", ms: 0 }], { epochMs: 0, pausedAtMs: invalid }, 5000#))
+        end function
+
+        @it("handles a clock whose epoch is in the future (negative position)")
+        function _()
+            timeline = [{ id: "a", ms: 10000 }, { id: "b", ms: 10000 }]
+            p = Clock.positionAt(timeline, { epochMs: 25000, pausedAtMs: invalid }, 20000#)
+            ' at = −5000 → lap −1, 15000 into the lap: the second piece, 5 s in.
+            m.assertEqual(Util.num(p.index), 1#)
+            m.assertEqual(Util.num(p.offsetMs), 5000#)
+            m.assertEqual(Util.num(p.lap), -1#)
+        end function
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("clockOffset")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        @it("reproduces every clockOffset case")
+        function _()
+            for each v in m.vectors.clockOffset
+                sample = Clock.sampleOf(v.serverTime, Util.num(v.sentAt), Util.num(v.receivedAt))
+                m.assertEqual(Util.num(sample), Util.num(v.expect), v.name)
+            end for
+        end function
+
+        @it("uses the median of the last five samples")
+        function _()
+            c = Clock.createOffset()
+            ' Samples 100, 5000 (one slow poll), 120, 110, 90, 105: the outlier never wins.
+            for each s in [100, 5000, 120, 110, 90, 105]
+                Clock.addSample(c, 10000# + s, 9000#, 11000#)
+            end for
+            m.assertEqual(c.samples.Count(), 5)
+            m.assertEqual(Util.num(c.offset), 110#)
+            m.assertTrue(c.synced)
+            m.assertEqual(Util.num(c.rtt), 2000#)
+        end function
+
+        @it("ignores an answer without serverTime")
+        function _()
+            c = Clock.createOffset()
+            Clock.addSample(c, invalid, 0#, 10#)
+            m.assertFalse(c.synced)
+            m.assertEqual(c.samples.Count(), 0)
+        end function
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("imageChoice")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        @it("reproduces every imageChoice case")
+        function _()
+            for each v in m.vectors.imageChoice.cases
+                actual = MediaPick.chooseStill(v.quality, Int(v.screenWidth), v.canHoldOriginal, v.original, v.display)
+                label = v.quality + " " + Str(v.screenWidth).Trim()
+                m.assertEqual(actual, v.expect, label)
+            end for
+        end function
+
+        @it("orders every candidate: chosen, other, fallbacks, poster — without repeats")
+        function _()
+            item = { id: "a:1", kind: "IMAGE", media: { original: "O", display: "D", poster: "P", fallbacks: ["F1", "D"] } }
+            caps = { screenWidth: 3840, originals: true }
+            m.assertEqual(MediaPick.candidates(item, { imageQuality: "AUTO" }, caps), ["O", "D", "F1", "P"])
+            m.assertEqual(MediaPick.candidates(item, { imageQuality: "DISPLAY" }, caps), ["D", "O", "F1", "P"])
+        end function
+
+        @it("tries a video's film and its fallbacks only")
+        function _()
+            item = { id: "a:2", kind: "VIDEO", media: { original: "V.mp4", display: "D", poster: "P", fallbacks: ["V2.mp4"] } }
+            m.assertEqual(MediaPick.candidates(item, { imageQuality: "AUTO" }, { screenWidth: 1920, originals: false }), ["V.mp4", "V2.mp4"])
+            m.assertEqual(MediaPick.stillOf(item), "D")
+        end function
+
+        @it("knows what this platform cannot play or decode")
+        function _()
+            m.assertFalse(MediaPick.videoPlayable("https://x/film.webm"))
+            m.assertTrue(MediaPick.videoPlayable("https://x/film.mp4?sig=1"))
+            m.assertFalse(MediaPick.stillDecodable("https://x/a.avif"))
+            m.assertTrue(MediaPick.stillDecodable("https://x/a.webp"))
+            m.assertTrue(MediaPick.stillDecodable("https://x/no-extension"))
+        end function
+
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+        @describe("schedule")
+        '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+        @it("reproduces every schedule case")
+        function _()
+            for each v in m.vectors.schedule.cases
+                minutes = Hours.toMinutes(v.time)
+                label = v.time
+                if v.schedule <> invalid then label = v.schedule["on"] + "-" + v.schedule["off"] + " at " + v.time
+                m.assertEqual(Hours.isOpen(v.schedule, minutes), v.expect, label)
+            end for
+        end function
+
+        @it("treats a malformed schedule as always on")
+        function _()
+            m.assertTrue(Hours.isOpen({ "on": "9:00", "off": "22:00" }, 3 * 60))
+            m.assertTrue(Hours.isOpen({ "on": "25:00", "off": "22:00" }, 3 * 60))
+        end function
+
+    end class
+
+end namespace

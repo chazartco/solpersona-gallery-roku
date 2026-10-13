@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  The whole player. Its script (MainScene.bs and components/scene/*.bs) is the
+  device simulator ported section by section: requests · pairing · sample ·
+  sync · cache · kept on the device · renderer · video · keys · debug.
+
+  Draw order, back to front: the keep-awake clip (hidden under everything),
+  the two art layers, the loading dot, the full-screen states, the sample
+  card, the blackout, identify, the offline dot, the debug panel, menus.
+-->
+<component name="MainScene" extends="Scene">
+    <interface>
+        <field id="exitApp" type="boolean" value="false" />
+        <field id="launchArgs" type="assocarray" />
+    </interface>
+    <children>
+        <Rectangle id="base" width="1920" height="1080" color="0x000000FF" />
+        <Video id="keepAwake" width="2" height="2" enableUI="false" mute="true" loop="true" disableScreenSaver="true" />
+        <Group id="layers">
+            <ArtLayer id="layerA" opacity="0" />
+            <ArtLayer id="layerB" opacity="0" />
+        </Group>
+        <Video id="artVideo" enableUI="false" mute="true" disableScreenSaver="true" visible="false" />
+        <Group id="decoders" translation="[-4000, 0]" />
+        <Poster id="loading" uri="pkg:/images/ui/dot.png" width="14" height="14" translation="[953, 533]" blendColor="0x2B7FF5FF" opacity="0" />
+        <PairingView id="pairing" visible="false" />
+        <StatusView id="status" visible="false" />
+        <SampleCard id="sampleCard" visible="false" />
+        <Rectangle id="blackout" width="1920" height="1080" color="0x000000FF" visible="false" />
+        <Label id="blackoutClock" translation="[1500, 1046]" width="400" horizAlign="right" color="0xFFFFFF38" visible="false" />
+        <IdentifyView id="identify" />
+        <Poster id="offline" uri="pkg:/images/ui/dot.png" width="10" height="10" translation="[15, 1055]" blendColor="0xE0773CFF" opacity="0" />
+        <DebugPanel id="debug" visible="false" />
+        <Menu id="menu" />
+
+        <Animation id="fadeA" duration="1" easeFunction="linear">
+            <FloatFieldInterpolator id="fadeAInterp" key="[0.0, 1.0]" keyValue="[0.0, 1.0]" fieldToInterp="layerA.opacity" />
+        </Animation>
+        <Animation id="fadeB" duration="1" easeFunction="linear">
+            <FloatFieldInterpolator id="fadeBInterp" key="[0.0, 1.0]" keyValue="[0.0, 1.0]" fieldToInterp="layerB.opacity" />
+        </Animation>
+        <Animation id="loadingAnim" duration="1.8" repeat="true" easeFunction="inOutQuad">
+            <FloatFieldInterpolator key="[0.0, 0.5, 1.0]" keyValue="[0.35, 0.9, 0.35]" fieldToInterp="loading.opacity" />
+        </Animation>
+        <Animation id="offlineAnim" duration="0.8" easeFunction="linear">
+            <FloatFieldInterpolator id="offlineInterp" key="[0.0, 1.0]" keyValue="[0.0, 0.85]" fieldToInterp="offline.opacity" />
+        </Animation>
+
+        <Timer id="tickTimer" repeat="true" duration="0.25" />
+        <Timer id="boundaryTimer" repeat="false" duration="1" />
+        <Timer id="secondTimer" repeat="true" duration="1" />
+        <Timer id="burnTimer" repeat="true" duration="120" />
+        <Timer id="syncTimer" repeat="false" duration="3" />
+        <Timer id="pairTimer" repeat="false" duration="3" />
+        <Timer id="sampleTimer" repeat="false" duration="60" />
+    </children>
+</component>

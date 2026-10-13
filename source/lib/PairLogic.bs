@@ -1,0 +1,167 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Hours.bs"
+
+' Pairing (SPEC §3) as a pure state machine, in RFC 8628's shape:
+' register → show the code → poll /token until somebody links the screen.
+'
+' The scene keeps one state object `P` (see `create`) and carries out the
+' actions each answer returns:
+'   { type: "pollToken", ms }        poll /token again after ms
+'   { type: "register", ms }         ask for a new code after ms
+'   { type: "savePairing" }          remember the unexpired registration
+'   { type: "linked", token, deviceId, name }
+'                                    store the token durably *before anything else*
+
+namespace PairLogic
+
+    function create() as object
+        return { registration: invalid, error: "", registerAttempts: 0, tokenFailures: 0 }
+    end function
+
+    ' `registration` is the 201 body plus { expiresAtMs, baseUrl }.
+    function onRegister(P as object, r as object, baseUrl as string) as object
+        if r.status = 201 and Util.isAA(r.data) and Util.str(r.data.deviceCode) <> invalid then
+            reg = r.data
+            reg.baseUrl = baseUrl
+            reg.expiresAtMs = Iso.toMs(reg.expiresAt)
+            P.registration = reg
+            P.error = ""
+            P.registerAttempts = 0
+            P.tokenFailures = 0
+            return [{ type: "savePairing" }, { type: "pollToken", ms: PairLogic.intervalMs(P) }]
+        end if
+        P.registerAttempts += 1
+        if r.network = true then
+            P.error = "Cannot reach " + Util.hostOf(baseUrl) + ". Retrying…"
+            return [{ type: "register", ms: Util.min(30000, 2000 * P.registerAttempts) }]
+        end if
+        if r.status = 429 then
+            P.error = "Too many screens asked for a code from here. Trying again shortly."
+            wait = 60000
+            if Util.isNumber(r.retryAfterMs) and r.retryAfterMs > 0 then wait = Int(r.retryAfterMs)
+            return [{ type: "register", ms: wait }]
+        end if
+        if Util.str(r.message) <> invalid then
+            P.error = r.message
+        else
+            P.error = "SolPersona did not answer as expected (" + Str(r.status).Trim() + ")."
+        end if
+        return [{ type: "register", ms: Util.min(30000, 2000 * P.registerAttempts) }]
+    end function
+
+    function intervalMs(P as object) as integer
+        if P.registration <> invalid and Util.isNumber(P.registration.intervalMs) and P.registration.intervalMs > 0 then
+            return Int(Util.max(1000, P.registration.intervalMs))
+        end if
+        return 3000
+    end function
+
+    ' Has the code run out (by the local wall clock, `nowWall`)?
+    function isExpired(P as object, nowWall as double) as boolean
+        reg = P.registration
+        if reg = invalid then return true
+        if reg.expiresAtMs = invalid then return false
+        return reg.expiresAtMs <= nowWall
+    end function
+
+    ' Keep a saved registration across an app restart only while it has time left.
+    function isReusable(reg as dynamic, baseUrl as string, nowWall as double) as boolean
+        if not Util.isAA(reg) or reg.baseUrl <> baseUrl or Util.str(reg.deviceCode) = invalid then return false
+        expires = Iso.toMs(reg.expiresAt)
+        return expires <> invalid and expires - nowWall > 20000
+    end function
+
+    function onToken(P as object, r as object) as object
+        if r.status = 202 then
+            P.error = ""
+            P.tokenFailures = 0
+            return [{ type: "pollToken", ms: PairLogic.intervalMs(P) }]
+        end if
+        if r.status = 200 and Util.isAA(r.data) and Util.str(r.data.accessToken) <> invalid then
+            deviceId = ""
+            name = ""
+            if Util.isAA(r.data.device) then
+                deviceId = Util.strOr(r.data.device.id, "")
+                name = Util.strOr(r.data.device.name, "")
+            end if
+            if deviceId = "" and P.registration <> invalid then deviceId = Util.strOr(P.registration.deviceId, "")
+            return [{ type: "linked", token: r.data.accessToken, deviceId: deviceId, name: name }]
+        end if
+        if r.status = 401 then
+            ' TOKEN_EXPIRED or SCREEN_NOT_LINKED: a new code, silently.
+            P.registration = invalid
+            return [{ type: "register", ms: 0 }]
+        end if
+        if r.status = 429 then
+            wait = 10000
+            if Util.isNumber(r.retryAfterMs) and r.retryAfterMs > 0 then wait = Int(r.retryAfterMs)
+            return [{ type: "pollToken", ms: wait }]
+        end if
+        ' Network error or an unexpected answer: keep showing the code, back off (max 30 s).
+        P.tokenFailures += 1
+        if r.network = true then
+            P.error = "Cannot reach " + Util.hostOf(Util.strOr(P.registration.baseUrl, "")) + ". Retrying…"
+        else if Util.str(r.message) <> invalid then
+            P.error = r.message
+        else
+            P.error = "Unexpected answer (" + Str(r.status).Trim() + ")."
+        end if
+        wait = PairLogic.intervalMs(P) + 0#
+        i = 1
+        while i < P.tokenFailures and wait < 30000
+            wait = wait * 2
+            i += 1
+        end while
+        return [{ type: "pollToken", ms: Int(Util.min(30000, wait)) }]
+    end function
+
+    ' "ABCD-EFGH" → ["ABCD", "EFGH"] for the large code with its accent dash.
+    function codeParts(code as dynamic) as object
+        s = Util.strOr(code, "")
+        dash = Instr(1, s, "-")
+        if dash = 0 then return [s, ""]
+        return [Left(s, dash - 1), Mid(s, dash + 1)]
+    end function
+
+end namespace
+
+' What played while out of touch (SPEC §4.1 `plays`). Recorded once a second
+' while polls are failing and the wall is visibly showing a piece; sent with
+' the first poll that gets through, then discarded.
+namespace PlayLog
+
+    function create() as object
+        return { entries: [] }
+    end function
+
+    sub record(log as object, itemId as dynamic, nowServer as double)
+        if Util.str(itemId) = invalid then return
+        last = invalid
+        if log.entries.Count() > 0 then last = log.entries[log.entries.Count() - 1]
+        if last <> invalid and last.itemId = itemId and nowServer - last.endMs < 5000 then
+            last.endMs = nowServer
+        else if log.entries.Count() < 2000 then
+            log.entries.Push({ itemId: itemId, startedAt: nowServer, endMs: nowServer })
+        end if
+    end sub
+
+    ' The first `limit` entries in wire form: { itemId, startedAt, ms }.
+    function pending(log as object, limit as integer) as object
+        out = []
+        for each e in log.entries
+            if out.Count() >= limit then exit for
+            out.Push({ itemId: e.itemId, startedAt: e.startedAt, ms: Util.max(0, e.endMs - e.startedAt) })
+        end for
+        return out
+    end function
+
+    sub settle(log as object, sent as integer)
+        if sent <= 0 then return
+        rest = []
+        for i = sent to log.entries.Count() - 1
+            rest.Push(log.entries[i])
+        end for
+        log.entries = rest
+    end sub
+
+end namespace

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  First run: "Register this screen to your SolPersona account" (SPEC §3.2,
+  wording exactly as §11c). The QR, the code very large, a countdown to a new
+  code, the screen id small at the bottom, and "Try a sample gallery" on OK.
+-->
+<component name="PairingView" extends="Group">
+    <interface>
+        <field id="code" type="string" onChange="onCode" />
+        <field id="pairHost" type="string" value="solpersona.com/pair" onChange="onText" />
+        <field id="pairUrl" type="string" onChange="onText" />
+        <field id="expiry" type="string" onChange="onText" />
+        <field id="deviceId" type="string" onChange="onText" />
+        <field id="qrUri" type="string" onChange="onQr" />
+        <field id="error" type="string" onChange="onText" />
+    </interface>
+</component>

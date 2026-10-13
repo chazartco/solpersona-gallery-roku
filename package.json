@@ -1,0 +1,24 @@
+{
+  "name": "solpersona-gallery-roku",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SolPersona Gallery for Roku: a SceneGraph channel that turns a Roku into a gallery screen.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "bsc --project bsconfig.json",
+    "lint": "bsc --project bsconfig.json --create-package false",
+    "build:test": "bsc --project bsconfig.test.json",
+    "test:headless": "node tools/run-headless-tests.mjs",
+    "art": "node tools/make-art.mjs",
+    "mock": "node tools/mock-server.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/canvas": "0.1.80",
+    "@rokucommunity/bslint": "0.8.46",
+    "brighterscript": "0.73.6",
+    "brs-node": "2.6.1",
+    "qrcode": "1.5.4",
+    "roku-deploy": "3.18.4",
+    "rooibos-roku": "5.17.0"
+  }
+}

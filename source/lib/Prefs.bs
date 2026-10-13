@@ -1,0 +1,123 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/Hours.bs"
+
+' Presentation settings (SPEC §8, reference/screen-settings.ts).
+'
+' The server sends the full resolved object, but a screen must survive an old
+' or odd one: unknown keys are ignored, a bad enum falls back to its default,
+' an out-of-range number is clamped. `resolve` always returns every key.
+
+namespace Prefs
+
+    function defaults() as object
+        return {
+            slideSeconds: 30
+            order: "GALLERY"
+            transition: "FADE"
+            transitionMs: 1200
+            loopShortVideos: true
+            maxVideoLoops: 3
+            videoSound: false
+            fit: "BLUR"
+            washOpacity: 60
+            pieceShadow: true
+            frameStyle: "GALLERY_WHITE"
+            marginPercent: 4
+            imageQuality: "AUTO"
+            captionStyle: "LABEL"
+            captionTiming: "ALWAYS"
+            captionCorner: "BOTTOM_LEFT"
+            showTitle: true
+            showArtist: true
+            showYear: true
+            showDescription: false
+            qrTarget: "SOLPERSONA"
+            qrCorner: "BOTTOM_RIGHT"
+            burnInGuard: true
+            prefetch: 2
+            schedule: invalid
+        }
+    end function
+
+    function resolve(raw as dynamic) as object
+        d = Prefs.defaults()
+        if not Util.isAA(raw) then return d
+        corners = ["BOTTOM_LEFT", "BOTTOM_RIGHT", "TOP_LEFT", "TOP_RIGHT"]
+        out = {
+            slideSeconds: Prefs.intIn(raw.slideSeconds, 5, 3600, d.slideSeconds)
+            order: Prefs.oneOf(raw.order, ["GALLERY", "SHUFFLE"], d.order)
+            transition: Prefs.oneOf(raw.transition, ["FADE", "DISSOLVE", "CUT"], d.transition)
+            transitionMs: Prefs.intIn(raw.transitionMs, 0, 5000, d.transitionMs)
+            loopShortVideos: Util.boolOr(raw.loopShortVideos, d.loopShortVideos)
+            maxVideoLoops: Prefs.intIn(raw.maxVideoLoops, 1, 20, d.maxVideoLoops)
+            videoSound: Util.boolOr(raw.videoSound, d.videoSound)
+            fit: Prefs.oneOf(raw.fit, ["BLUR", "FRAME", "BLACK", "FILL"], d.fit)
+            washOpacity: Prefs.intIn(raw.washOpacity, 0, 100, d.washOpacity)
+            pieceShadow: Util.boolOr(raw.pieceShadow, d.pieceShadow)
+            frameStyle: Prefs.oneOf(raw.frameStyle, ["GALLERY_WHITE", "MUSEUM_BLACK", "OAK", "WALNUT", "NONE"], d.frameStyle)
+            marginPercent: Prefs.intIn(raw.marginPercent, 0, 20, d.marginPercent)
+            imageQuality: Prefs.oneOf(raw.imageQuality, ["AUTO", "ORIGINAL", "DISPLAY"], d.imageQuality)
+            captionStyle: Prefs.oneOf(raw.captionStyle, ["LABEL", "MINIMAL", "NONE"], d.captionStyle)
+            captionTiming: Prefs.oneOf(raw.captionTiming, ["ALWAYS", "START"], d.captionTiming)
+            captionCorner: Prefs.oneOf(raw.captionCorner, corners, d.captionCorner)
+            showTitle: Util.boolOr(raw.showTitle, d.showTitle)
+            showArtist: Util.boolOr(raw.showArtist, d.showArtist)
+            showYear: Util.boolOr(raw.showYear, d.showYear)
+            showDescription: Util.boolOr(raw.showDescription, d.showDescription)
+            qrTarget: Prefs.oneOf(raw.qrTarget, ["NONE", "SOLPERSONA", "VAULT", "MARKETPLACE"], d.qrTarget)
+            qrCorner: Prefs.oneOf(raw.qrCorner, corners, d.qrCorner)
+            burnInGuard: Util.boolOr(raw.burnInGuard, d.burnInGuard)
+            prefetch: Prefs.intIn(raw.prefetch, 1, 10, d.prefetch)
+            schedule: Prefs.scheduleOf(raw.schedule)
+        }
+        return out
+    end function
+
+    function intIn(value as dynamic, lo as integer, hi as integer, fallback as integer) as integer
+        if not Util.isNumber(value) then return fallback
+        v = Util.num(value)
+        if v < lo then return lo
+        if v > hi then return hi
+        return Int(v + 0.5#)
+    end function
+
+    function oneOf(value as dynamic, allowed as object, fallback as string) as string
+        if not Util.isString(value) then return fallback
+        for each option in allowed
+            if option = value then return option
+        end for
+        return fallback
+    end function
+
+    function scheduleOf(value as dynamic) as dynamic
+        if not Util.isAA(value) then return invalid
+        if Hours.toMinutes(value["on"]) < 0 or Hours.toMinutes(value["off"]) < 0 then return invalid
+        return { "on": value["on"], "off": value["off"] }
+    end function
+
+    ' The keys that change how the piece on the wall looks. A new version that
+    ' differs in any of them redraws the wall at once (SPEC §8 "Redraw on change").
+    function presentationKeys() as object
+        return ["fit", "washOpacity", "pieceShadow", "frameStyle", "marginPercent", "imageQuality", "captionStyle", "captionTiming", "captionCorner", "showTitle", "showArtist", "showYear", "showDescription", "qrTarget", "qrCorner", "videoSound"]
+    end function
+
+    ' A short signature of the presentation keys, part of what identifies a
+    ' piece on the wall: the same piece with a new look is a new target.
+    function signature(s as object) as string
+        parts = []
+        for each k in Prefs.presentationKeys()
+            v = s[k]
+            if Util.isBool(v) then
+                if v then parts.Push("1") else parts.Push("0")
+            else if Util.isNumber(v) then
+                parts.Push(Int(v).ToStr())
+            else if Util.isString(v) then
+                parts.Push(v)
+            else
+                parts.Push("-")
+            end if
+        end for
+        return parts.Join(",")
+    end function
+
+end namespace

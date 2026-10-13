@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  While the sample gallery plays (SPEC §11b): the way to link stays on the
+  wall, small, in a corner the show's label and code leave free —
+  "Link this screen — solpersona.com/pair · ABCD-EFGH" with the small QR.
+-->
+<component name="SampleCard" extends="Group">
+    <interface>
+        <field id="code" type="string" onChange="build" />
+        <field id="pairHost" type="string" value="solpersona.com/pair" onChange="build" />
+        <field id="qrUri" type="string" onChange="build" />
+        <field id="corner" type="string" value="TOP_RIGHT" onChange="place" />
+    </interface>
+</component>

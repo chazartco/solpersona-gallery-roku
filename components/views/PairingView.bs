@@ -1,0 +1,120 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/source/lib/PairLogic.bs"
+import "pkg:/components/ui/Ui.bs"
+
+' Legible from across a room: the code is 78 px monospace, the heading 48 px,
+' white on near-black. Laid out as the simulator's `.pair` row: the QR on a
+' white card on the left, the words on the right, the whole row centred.
+
+const QR_SIZE = 324
+const QR_PAD = 13
+const COLUMN_W = 670
+const ROW_GAP = 76
+
+sub init()
+    Ui.makePoster(m.top, "pkg:/images/ui/bg-screen.jpg", 0, 0, Ui.SCREEN_W, Ui.SCREEN_H)
+    Ui.makeWordmark(m.top)
+
+    m.row = m.top.CreateChild("Group")
+    card = QR_SIZE + 2 * QR_PAD
+    Ui.makeShadow(m.row, { x: 0, y: 0, w: card, h: card }, 16, 0.5)
+    Ui.makePanel(m.row, 0, 0, card, card, "0xFFFFFFFF", 1.0, 12)
+    m.qr = m.row.CreateChild("Poster")
+    m.qr.translation = [QR_PAD, QR_PAD]
+    m.qr.width = QR_SIZE
+    m.qr.height = QR_SIZE
+    m.qr.loadWidth = QR_SIZE
+    m.qr.loadHeight = QR_SIZE
+    m.qr.loadDisplayMode = "scaleToFit"
+    m.qrWait = Ui.makeLabel(m.row, Ui.SANS, 16, "0x999999FF", "Asking for a code…", { width: card, align: "center", y: card / 2 - 10 })
+
+    m.col = m.row.CreateChild("Group")
+    m.col.translation = [card + ROW_GAP, 0]
+    m.kicker = Ui.makeLabel(m.col, Ui.SANS, 16, Ui.INK_FAINT, "NEW SCREEN", {})
+    m.title = Ui.makeLabel(m.col, Ui.SERIF, 48, Ui.INK, "Register this screen to your SolPersona account", { width: COLUMN_W, wrap: true, maxLines: 3, lineSpacing: 4 })
+    m.step = Ui.makeLabel(m.col, Ui.SANS, 20, "0xECE9E3C8", "", { width: COLUMN_W, wrap: true, maxLines: 3, lineSpacing: 6 })
+    m.codeA = Ui.makeLabel(m.col, Ui.MONO, 78, "0xFFFFFFFF", "····", {})
+    m.codeDash = Ui.makeLabel(m.col, Ui.MONO, 78, Ui.ACCENT, "-", {})
+    m.codeB = Ui.makeLabel(m.col, Ui.MONO, 78, "0xFFFFFFFF", "····", {})
+    m.meta = Ui.makeLabel(m.col, Ui.SANS, 16, Ui.INK_FAINT, "", { width: COLUMN_W, wrap: true, maxLines: 3, lineSpacing: 6 })
+
+    ' "Try a sample gallery": secondary, never competing with the code. It is
+    ' what OK does on this screen, so it is drawn as the focused control.
+    m.button = m.col.CreateChild("Group")
+    fill = Ui.makePanel(m.button, 0, 0, 1, 1, "0x2B7FF5FF", 0.16, 22)
+    ring = Ui.makeRing(m.button, 0, 0, 1, 1, Ui.ACCENT, 1.0, true)
+    btnLabel = Ui.makeLabel(m.button, Ui.SANS, 20, Ui.INK, "Try a sample gallery", { x: 26, y: 11 })
+    sz = Ui.sizeOf(btnLabel)
+    bw = Int(sz.w + 52)
+    bh = Int(sz.h + 22)
+    fill.width = bw
+    fill.height = bh
+    ring.width = bw
+    ring.height = bh
+    m.buttonSize = { w: bw, h: bh }
+    m.hint = Ui.makeLabel(m.col, Ui.SANS, 16, Ui.INK_FAINT, "Press OK", {})
+    m.err = Ui.makeLabel(m.col, Ui.SANS, 17, Ui.WARN, "", { width: COLUMN_W, wrap: true, maxLines: 2 })
+
+    m.device = Ui.makeLabel(m.top, Ui.MONO_REGULAR, 14, "0xECE9E347", "", { width: Ui.SCREEN_W, align: "center", y: Ui.SCREEN_H - 32 - 18 })
+    onText()
+end sub
+
+sub onCode()
+    parts = PairLogic.codeParts(m.top.code)
+    if m.top.code = "" then parts = ["····", "····"]
+    m.codeA.text = parts[0]
+    m.codeB.text = parts[1]
+    m.codeDash.visible = parts[1] <> ""
+    layout()
+end sub
+
+sub onQr()
+    m.qr.uri = m.top.qrUri
+    m.qrWait.visible = m.top.qrUri = ""
+end sub
+
+sub onText()
+    m.step.text = "Scan the code with your phone, or go to " + m.top.pairHost + " and enter"
+    metaLines = []
+    if m.top.pairUrl <> "" then metaLines.Push(m.top.pairUrl)
+    if m.top.expiry <> "" then metaLines.Push(m.top.expiry)
+    m.meta.text = metaLines.Join(Chr(10))
+    m.err.text = m.top.error
+    if m.top.deviceId <> "" then
+        m.device.text = "Screen " + m.top.deviceId
+    else
+        m.device.text = ""
+    end if
+    layout()
+end sub
+
+sub layout()
+    y = 0
+    m.kicker.translation = [0, y]
+    y += Ui.sizeOf(m.kicker).h + 13
+    m.title.translation = [0, y]
+    y += Ui.sizeOf(m.title).h + 24
+    m.step.translation = [0, y]
+    y += Ui.sizeOf(m.step).h + 12
+    m.codeA.translation = [0, y]
+    x = Ui.sizeOf(m.codeA).w
+    if m.codeDash.visible then
+        m.codeDash.translation = [x, y]
+        x += Ui.sizeOf(m.codeDash).w
+    end if
+    m.codeB.translation = [x, y]
+    y += Ui.sizeOf(m.codeA).h + 10
+    m.meta.translation = [0, y]
+    if m.meta.text <> "" then y += Ui.sizeOf(m.meta).h + 22
+    m.button.translation = [0, y]
+    m.hint.translation = [m.buttonSize.w + 18, y + (m.buttonSize.h - Ui.sizeOf(m.hint).h) / 2]
+    y += m.buttonSize.h + 14
+    m.err.translation = [0, y]
+    y += 30
+
+    card = QR_SIZE + 2 * QR_PAD
+    rowW = card + ROW_GAP + COLUMN_W
+    rowH = Util.max(card, y)
+    ' The QR sits level with the heading block, not the whole column.
+    m.row.translation = [Int((Ui.SCREEN_W - rowW) / 2), Int((Ui.SCREEN_H - rowH) / 2)]
+end sub

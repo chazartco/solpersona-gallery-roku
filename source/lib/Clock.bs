@@ -1,0 +1,118 @@
+import "pkg:/source/lib/Util.bs"
+
+' The clock every screen plays by — a line-for-line port of
+' docs/solpersona/reference/screen-timeline.ts (positionAt and the helpers it
+' needs) plus the server-time estimate of SPEC §5.1.
+'
+' A show is a timeline (pieces in order, each with how long it stays up) and an
+' epoch (when position zero fell). Where a screen is, is arithmetic:
+' (now − epoch) mod length. Screens never talk to each other; they share the
+' epoch and correct their own clock against the server on every poll.
+'
+' All times are Doubles: epoch milliseconds overflow a 32-bit Integer.
+
+namespace Clock
+
+    function timelineLength(timeline as object) as double
+        total = 0#
+        for each slot in timeline
+            total += Util.num(slot.ms)
+        end for
+        return total
+    end function
+
+    ' When slot `index` starts, measured from position zero of one lap.
+    function startOf(timeline as object, index as integer) as double
+        at = 0#
+        i = 0
+        while i < index and i < timeline.Count()
+            at += Util.num(timeline[i].ms)
+            i += 1
+        end while
+        return at
+    end function
+
+    ' Where the show is at `nowMs`, by the clock: { index, offsetMs, lap }, or
+    ' invalid for an empty timeline. `clockState` is { epochMs, pausedAtMs }.
+    function positionAt(timeline as object, clockState as object, nowMs as double) as dynamic
+        total = Clock.timelineLength(timeline)
+        if timeline.Count() = 0 or total <= 0 then return invalid
+        if Util.isNumber(clockState.pausedAtMs) then
+            at = Util.num(clockState.pausedAtMs) - Util.num(clockState.epochMs)
+        else
+            at = nowMs - Util.num(clockState.epochMs)
+        end if
+        lap = Util.floor(at / total)
+        into = at - lap * total
+        for index = 0 to timeline.Count() - 1
+            ms = Util.num(timeline[index].ms)
+            if into < ms then return { index: index, offsetMs: into, lap: lap }
+            into -= ms
+        end for
+        last = timeline.Count() - 1
+        return { index: last, offsetMs: Util.num(timeline[last].ms), lap: lap }
+    end function
+
+    function isPaused(clockState as object) as boolean
+        return clockState <> invalid and Util.isNumber(clockState.pausedAtMs)
+    end function
+
+    ' --- Server time (SPEC §5.1) ------------------------------------------------
+    '
+    '   sample = serverTime − (sentAt + receivedAt) / 2
+    '   offset = median of the last five samples
+    '   now()  = localMonotonicMs + offset
+
+    function createOffset() as object
+        return { samples: [], offset: 0#, rtt: invalid, synced: false }
+    end function
+
+    function sampleOf(serverTime as dynamic, sentAt as double, receivedAt as double) as dynamic
+        if not Util.isNumber(serverTime) then return invalid
+        return Util.num(serverTime) - (sentAt + receivedAt) / 2#
+    end function
+
+    ' Adds one round trip; the median of the last five means one slow poll
+    ' cannot throw the screen off.
+    sub addSample(c as object, serverTime as dynamic, sentAt as double, receivedAt as double)
+        sample = Clock.sampleOf(serverTime, sentAt, receivedAt)
+        if sample = invalid then return
+        c.samples.Push(sample)
+        if c.samples.Count() > 5 then c.samples.Shift()
+        sorted = Util.arrayCopy(c.samples)
+        sorted.Sort()
+        c.offset = sorted[sorted.Count() \ 2]
+        c.rtt = receivedAt - sentAt
+        c.synced = true
+    end sub
+
+    ' --- Local monotonic time ---------------------------------------------------
+    '
+    ' roTimeSpan never steps when the wall clock is corrected, but its
+    ' TotalMilliseconds() is a 32-bit Integer that wraps after ~24.8 days, so it
+    ' is folded into the anchor every few days. The result starts out equal to
+    ' the wall clock, so an offset saved before a reboot still applies after it.
+
+    function createMono() as object
+        span = CreateObject("roTimeSpan")
+        span.Mark()
+        return { anchor: Util.wallMs(), span: span }
+    end function
+
+    function monoNow(mono as object) as double
+        elapsed = mono.span.TotalMilliseconds()
+        if elapsed > 259200000 ' three days
+            mono.anchor = mono.anchor + elapsed
+            mono.span.Mark()
+            elapsed = 0
+        end if
+        return mono.anchor + elapsed
+    end function
+
+    ' Tasks stamp requests with the wall clock (every thread agrees on it); this
+    ' maps such a stamp onto the monotonic scale at the moment it is read.
+    function wallToMono(mono as object, wall as double) as double
+        return wall + (Clock.monoNow(mono) - Util.wallMs())
+    end function
+
+end namespace

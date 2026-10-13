@@ -1,0 +1,175 @@
+' Video (SPEC §6.3) and keeping the screen awake.
+'
+' One Video node plays the films: Roku decodes one video at a time. It is
+' moved into the front layer's video slot, over the film's still, once the
+' layer's transition has finished — the video plane sits under the graphics
+' and does not fade with them, so the still fades and the film then takes
+' over (and stops before the next fade begins).
+'
+' MP4 (H.264/AAC) plays; WebM/VP9 shows the still for the slot unless this
+' Roku says it can decode VP9. Muted unless videoSound. A screen joining
+' mid-slot starts at offsetMs mod duration; whole plays loop until the slot
+' ends; an estimated slot lets the play finish (Planner.shouldHoldVideo).
+'
+' The screensaver: a SceneGraph app with no playing video lets the Roku
+' screensaver start. A wall must not be interrupted, so a tiny silent black
+' clip (media/keepawake.mp4) loops under everything, hidden, with
+' disableScreenSaver set — the documented way to hold off the screensaver.
+' See docs/QUESTIONS.md about certification rule 4.5. It stops while a film
+' plays (one decoder) — the film itself keeps the screen awake then.
+
+sub initFilm()
+    m.film = m.top.FindNode("artVideo")
+    m.film.ObserveField("state", "onFilmState")
+    m.filmLayer = invalid
+    m.awake = m.top.FindNode("keepAwake")
+    content = CreateObject("roSGNode", "ContentNode")
+    content.url = "pkg:/media/keepawake.mp4"
+    content.streamFormat = "mp4"
+    m.awake.content = content
+    info = CreateObject("roDeviceInfo")
+    m.vp9 = false
+    vp9 = info.CanDecodeVideo({ Codec: "vp9", Container: "mkv" })
+    if Util.isAA(vp9) and vp9.result = true then m.vp9 = true
+    setKeepAwake(m.config.keepAwake)
+end sub
+
+sub setKeepAwake(on as boolean)
+    if on and m.filmLayer = invalid then
+        if m.awake.state <> "playing" then m.awake.control = "play"
+    else
+        m.awake.control = "stop"
+    end if
+end sub
+
+sub startFilm(idx as integer)
+    L = m.layers[idx]
+    e = m.cache[L.entryKey]
+    if e = invalid or not L.isVideo then return
+    if L.target <> invalid and (L.target.paused or m.blackout) then return
+    url = e.filmUrls[0]
+    kept = keptPathFor(url)
+    if kept <> invalid and not e.keptFilmFailed then url = kept
+
+    m.awake.control = "stop"
+    stopFilmQuietly()
+    parent = m.film.GetParent()
+    if parent <> invalid then parent.RemoveChild(m.film)
+    L.node.videoSlot.AppendChild(m.film)
+    r = L.node.pieceRect
+    if L.settings.fit = "FILL" or r = invalid then r = { x: 0, y: 0, w: Ui.SCREEN_W, h: Ui.SCREEN_H }
+    m.film.translation = [r.x, r.y]
+    m.film.width = r.w
+    m.film.height = r.h
+
+    content = CreateObject("roSGNode", "ContentNode")
+    content.url = url
+    content.streamFormat = MediaPick.streamFormatOf(e.filmUrls[0])
+    ' In step: a screen joining mid-slot starts the film where the others are.
+    if Util.isNumber(e.durationMs) and e.durationMs > 0 and L.target <> invalid then
+        at = (L.target.offsetMs - Util.floor(L.target.offsetMs / e.durationMs) * e.durationMs) / 1000.0
+        if at < e.durationMs / 1000.0 - 0.25 then content.PlayStart = Int(at)
+    end if
+    m.film.content = content
+    m.film.mute = not L.settings.videoSound
+    m.film.visible = true
+    m.film.control = "play"
+    m.filmLayer = idx
+    L.filmStarted = true
+    L.filmUrl = url
+    L.playEnded = false
+end sub
+
+' Stops the film and gives the screen back to the keep-awake clip.
+sub stopFilm()
+    stopFilmQuietly()
+    setKeepAwake(m.config.keepAwake)
+end sub
+
+sub stopFilmQuietly()
+    if m.filmLayer = invalid then return
+    L = m.layers[m.filmLayer]
+    L.filmStarted = false
+    m.filmLayer = invalid
+    m.film.control = "stop"
+    m.film.visible = false
+    parent = m.film.GetParent()
+    if parent <> invalid then parent.RemoveChild(m.film)
+    m.top.AppendChild(m.film)
+end sub
+
+sub onFilmState(event as object)
+    if m.filmLayer = invalid then return
+    L = m.layers[m.filmLayer]
+    e = m.cache[L.entryKey]
+    state = event.GetData()
+    if state = "playing" then
+        d = m.film.duration
+        if Util.isNumber(d) and d > 0 then
+            ' The first time a film's length is known: report it (SPEC §6.4).
+            SyncLogic.reportDuration(m.S, L.itemId, d)
+            L.durationMs = d * 1000
+            if e <> invalid then e.durationMs = d * 1000
+        end if
+    else if state = "finished" then
+        onFilmEnded(L)
+    else if state = "error" then
+        if e <> invalid and L.filmUrl <> e.filmUrls[0] and not e.keptFilmFailed then
+            ' The stick's copy would not play from local storage here: stream it.
+            e.keptFilmFailed = true
+            idx = m.filmLayer
+            stopFilmQuietly()
+            startFilm(idx)
+            return
+        end if
+        ' A film this Roku cannot play: its still stays up for the slot.
+        if e <> invalid then e.stillFallback = true
+        m.S.lastError = "could not play " + L.itemId
+        L.isVideo = false
+        stopFilm()
+    end if
+end sub
+
+sub onFilmEnded(L as object)
+    t = m.target
+    if t <> invalid and t.key = L.key and not t.paused and not m.blackout and m.layers[m.front].node.IsSameNode(L.node) then
+        ' The slot is not over: another whole play.
+        m.film.control = "replay"
+    else
+        ' The slot is over (or we held it for this): now the next piece may come.
+        L.playEnded = true
+        tick()
+    end if
+end sub
+
+' Keeps a playing film where the clock says it should be (screens in step).
+sub syncPlayback(L as object, target as object, nowLocal as double)
+    L.target = target
+    L.estimated = target.estimated
+    L.holdSince = 0
+    if not L.isVideo then return
+    if not L.filmStarted then
+        if not target.paused and not m.blackout and m.transition = invalid then startFilm(m.front)
+        return
+    end if
+    if target.paused or m.blackout then
+        if m.film.state = "playing" then m.film.control = "pause"
+        return
+    end if
+    if m.film.state = "paused" and not L.playEnded then m.film.control = "resume"
+    d = m.film.duration
+    ' Seeking rebuffers on a Roku, so drift is corrected gently: only when
+    ' more than 1.5 s out, at most every 10 s, never near either end.
+    if not target.estimated and Util.isNumber(d) and d > 3 and nowLocal - L.lastSeek > 10000 and m.film.state = "playing" then
+        dms = d * 1000
+        expected = (target.offsetMs - Util.floor(target.offsetMs / dms) * dms) / 1000.0
+        if expected > 1 and expected < d - 1 and Abs(m.film.position - expected) > 1.5 then
+            m.film.seek = expected
+            L.lastSeek = nowLocal
+        end if
+    end if
+end sub
+
+sub pauseFilmForBlackout()
+    if m.filmLayer <> invalid and m.film.state = "playing" then m.film.control = "pause"
+end sub

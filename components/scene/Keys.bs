@@ -1,0 +1,234 @@
+' The remote (SPEC §11). The wall is controlled from the dashboard; the
+' remote only needs:
+'   OK      pairing screen: Try a sample gallery · otherwise: the overlay
+'           (name, owner, connection, version, Forget this account, debug)
+'   Back    closes a menu · stops the sample · otherwise asks "Leave the
+'           gallery?" — exiting by accident is the commonest failure on a wall
+'   ★ ×5    on the pairing screen, within five seconds: the developer menu
+'           (SolPersona address, suggested name, debug, keep awake)
+
+sub initKeys()
+    m.menuKind = ""
+    m.starTimes = []
+    m.views.menu.ObserveField("selected", "onMenuSelected")
+    m.views.menu.ObserveField("cancelled", "onMenuCancelled")
+end sub
+
+function onKeyEvent(key as string, press as boolean) as boolean
+    ' Back must never fall through to the OS: that would exit without asking.
+    if not press then return key = "back"
+    if m.menuKind <> "" then return true
+    if key = "back" then
+        if m.mode = "sample" then
+            stopSample()
+        else
+            openMenu("exit")
+        end if
+        return true
+    else if key = "OK" then
+        if m.mode = "pairing" then
+            startSample()
+        else if m.mode = "player" or m.mode = "sample" then
+            openMenu("overlay")
+        end if
+        return true
+    else if key = "options" then
+        if m.mode = "pairing" then
+            countStar()
+        else if m.mode = "player" or m.mode = "sample" then
+            openMenu("overlay")
+        end if
+        return true
+    end if
+    return false
+end function
+
+sub countStar()
+    now = monoNow()
+    recent = []
+    for each t in m.starTimes
+        if now - t < 5000 then recent.Push(t)
+    end for
+    recent.Push(now)
+    m.starTimes = recent
+    if recent.Count() >= 5 then
+        m.starTimes = []
+        openMenu("dev")
+    end if
+end sub
+
+sub openMenu(kind as string)
+    menu = m.views.menu
+    menu.horizontal = false
+    menu.panelWidth = 760
+    menu.body = ""
+    menu.rows = []
+    debugText = "Debug overlay: off"
+    if m.config.debug then debugText = "Debug overlay: on"
+    if kind = "overlay" and m.mode = "sample" then
+        menu.title = "Sample gallery"
+        menu.body = "A public sample from SolPersona. Link this screen to show your own gallery."
+        menu.rows = [["Connection", connectionText()], ["Version", m.appVersion]]
+        menu.buttons = [{ id: "stopSample", text: "Back to the pairing screen" }, { id: "debug", text: debugText }, { id: "close", text: "Close" }]
+    else if kind = "overlay" then
+        info = m.S.deviceInfo
+        name = "This screen"
+        owner = "—"
+        if info <> invalid then
+            if Util.strOr(info.name, "") <> "" then name = info.name
+            if Util.str(info.owner) <> invalid then owner = "@" + info.owner
+        end if
+        rows = [["Owner", owner], ["Connection", connectionText()], ["Showing", showingText()]]
+        kept = keptText()
+        if kept <> "" then rows.Push(["On this screen", kept])
+        rows.Push(["Version", m.appVersion])
+        if m.device <> invalid then rows.Push(["Screen", m.device.deviceId])
+        menu.title = name
+        menu.rows = rows
+        menu.buttons = [{ id: "close", text: "Close" }, { id: "debug", text: debugText }, { id: "forget", text: "Forget this account", tone: "danger" }]
+    else if kind = "exit" then
+        menu.title = "Leave the gallery?"
+        menu.body = "The screen goes back to the Roku home screen."
+        menu.panelWidth = 640
+        menu.horizontal = true
+        menu.buttons = [{ id: "stay", text: "Stay" }, { id: "leave", text: "Leave" }]
+    else if kind = "forget" then
+        menu.title = "Forget this account?"
+        menu.body = "This screen will be unlinked from its SolPersona account and show a new pairing code."
+        menu.panelWidth = 680
+        menu.buttons = [{ id: "close", text: "Cancel" }, { id: "forgetConfirm", text: "Forget this account", tone: "danger" }]
+    else if kind = "dev" then
+        awake = "Keep the screen awake: on"
+        if not m.config.keepAwake then awake = "Keep the screen awake: off"
+        name = m.config.name
+        if name = "" then name = "—"
+        menu.title = "Developer settings"
+        menu.rows = [["SolPersona address", m.config.baseUrl], ["Name offered", name], ["Storage", storageText()], ["Version", m.appVersion]]
+        menu.buttons = [
+            { id: "prod", text: "Use " + PRODUCTION_BASE }
+            { id: "enterBase", text: "Enter an address…" }
+            { id: "enterName", text: "Name offered when registering…" }
+            { id: "debug", text: debugText }
+            { id: "keepAwake", text: awake }
+            { id: "close", text: "Close" }
+        ]
+    end if
+    m.menuKind = kind
+    menu.focusIndex = 0
+    menu.build = true
+    menu.visible = true
+    menu.SetFocus(true)
+end sub
+
+sub closeMenu()
+    m.menuKind = ""
+    m.views.menu.visible = false
+    m.top.SetFocus(true)
+end sub
+
+sub onMenuCancelled()
+    closeMenu()
+end sub
+
+sub onMenuSelected(event as object)
+    id = event.GetData()
+    kind = m.menuKind
+    if id = "close" or id = "stay" then
+        closeMenu()
+    else if id = "leave" then
+        m.top.exitApp = true
+    else if id = "debug" then
+        m.config.debug = not m.config.debug
+        saveConfig()
+        m.views.debug.visible = m.config.debug
+        if m.config.debug then renderDebug()
+        openMenu(kind)
+    else if id = "forget" then
+        openMenu("forget")
+    else if id = "forgetConfirm" then
+        closeMenu()
+        forgetScreen()
+    else if id = "stopSample" then
+        closeMenu()
+        stopSample()
+    else if id = "prod" then
+        closeMenu()
+        changeBase(PRODUCTION_BASE)
+    else if id = "enterBase" then
+        closeMenu()
+        openKeyboard("base", "SolPersona address", m.config.baseUrl, "For example http://192.168.1.20:8080. Changing it forgets this screen's link.")
+    else if id = "enterName" then
+        closeMenu()
+        openKeyboard("name", "Name offered when registering", m.config.name, "The person linking the screen can change it.")
+    else if id = "keepAwake" then
+        m.config.keepAwake = not m.config.keepAwake
+        saveConfig()
+        setKeepAwake(m.config.keepAwake)
+        openMenu("dev")
+    end if
+end sub
+
+sub openKeyboard(purpose as string, title as string, text as string, note as string)
+    dialog = CreateObject("roSGNode", "StandardKeyboardDialog")
+    if dialog = invalid then dialog = CreateObject("roSGNode", "KeyboardDialog")
+    dialog.title = title
+    dialog.text = text
+    dialog.buttons = ["Save", "Cancel"]
+    if dialog.HasField("message") then dialog.message = [note]
+    m.keyboardPurpose = purpose
+    dialog.ObserveField("buttonSelected", "onKeyboardButton")
+    m.top.dialog = dialog
+end sub
+
+sub onKeyboardButton(event as object)
+    dialog = event.GetRoSGNode()
+    index = event.GetData()
+    value = dialog.text.Trim()
+    dialog.close = true
+    m.top.SetFocus(true)
+    if index <> 0 then return
+    if m.keyboardPurpose = "base" then
+        lower = LCase(value)
+        if Left(lower, 7) = "http://" or Left(lower, 8) = "https://" then changeBase(value)
+    else if m.keyboardPurpose = "name" then
+        m.config.name = Left(value, 60)
+        saveConfig()
+    end if
+end sub
+
+function connectionText() as string
+    if m.S.online then
+        if m.S.lastSyncAt = invalid then return "Connecting"
+        ago = Int((monoNow() - m.S.lastSyncAt) / 1000)
+        return "Online · last answer " + ago.ToStr() + " s ago"
+    end if
+    return "Offline — playing by the last clock (" + m.S.failures.ToStr() + " failed)"
+end function
+
+function showingText() as string
+    L = m.layers[m.front]
+    if L.itemId = invalid or L.target = invalid then return "Nothing"
+    item = L.target.item
+    text = Util.strOr(item.title, "Untitled")
+    if Util.isAA(item.artist) and Util.str(item.artist.name) <> invalid then text = text + " — " + item.artist.name
+    return text
+end function
+
+' "12 of 40", or what to do about the stick (SPEC §11a).
+function keptText() as string
+    if m.kept.on then
+        counts = keptCounts()
+        text = counts.stored.ToStr() + " of " + counts.total.ToStr() + " pieces kept"
+        if counts.stored >= counts.total and counts.total > 0 then text = "All " + counts.total.ToStr() + " pieces — plays offline"
+        return text
+    end if
+    if m.wantKeep and m.kept.error <> invalid then return m.kept.error
+    return ""
+end function
+
+function storageText() as string
+    st = m.storage
+    text = "cache " + st.cacheDir + " (" + Str(st.cacheBudgetMb).Trim() + " MB)"
+    if st.ext <> invalid then text = text + " · " + st.ext + " " + st.extNote + " (" + Str(st.extFreeMb).Trim() + " MB free)"
+    return text
+end function

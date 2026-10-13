@@ -1,0 +1,128 @@
+import "pkg:/source/lib/Util.bs"
+import "pkg:/components/ui/Ui.bs"
+
+sub init()
+    m.buttonNodes = []
+    m.top.visible = false
+end sub
+
+' Set every content field, then `build = true`.
+sub onBuild()
+    Ui.clear(m.top)
+    m.buttonNodes = []
+    Ui.makeRect(m.top, 0, 0, Ui.SCREEN_W, Ui.SCREEN_H, "0x000000FF", 0.6)
+    panel = m.top.CreateChild("Group")
+    pw = m.top.panelWidth
+    pad = 40
+    inner = pw - 2 * pad
+    shadow = Ui.makePoster(panel, "pkg:/images/ui/shadow.9.png", -48, -36, 1, 1)
+    shadow.opacity = 0.6
+    bg = Ui.makePanel(panel, 0, 0, pw, 1, "0x121214FF", 0.97, 12)
+    ring = Ui.makeRing(panel, 0, 0, pw, 1, "0xFFFFFFFF", 0.09)
+
+    y = pad
+    if m.top.title <> "" then
+        t = Ui.makeLabel(panel, Ui.SERIF, 34, Ui.INK, m.top.title, { x: pad, y: y, width: inner, wrap: true, maxLines: 2 })
+        y += Ui.sizeOf(t).h + 14
+    end if
+    if m.top.body <> "" then
+        b = Ui.makeLabel(panel, Ui.SANS, 20, "0xECE9E3C8", m.top.body, { x: pad, y: y, width: inner, wrap: true, maxLines: 4, lineSpacing: 6 })
+        y += Ui.sizeOf(b).h + 16
+    end if
+    rows = m.top.rows
+    if rows <> invalid and rows.Count() > 0 then
+        y += 6
+        for each row in rows
+            Ui.makeLabel(panel, Ui.SANS, 18, Ui.INK_FAINT, row[0], { x: pad, y: y + 1, width: 200 })
+            v = Ui.makeLabel(panel, Ui.SANS, 19, Ui.INK, row[1], { x: pad + 210, y: y, width: inner - 210, wrap: true, maxLines: 2 })
+            y += Util.max(28, Ui.sizeOf(v).h) + 8
+        end for
+        y += 14
+    end if
+
+    buttons = m.top.buttons
+    if buttons = invalid then buttons = []
+    bh = 58
+    gap = 12
+    if m.top.horizontal and buttons.Count() > 0 then
+        bw = Int((inner - gap * (buttons.Count() - 1)) / buttons.Count())
+        x = pad
+        for each spec in buttons
+            m.buttonNodes.Push(makeButton(panel, spec, x, y, bw, bh))
+            x += bw + gap
+        end for
+        y += bh
+    else
+        for each spec in buttons
+            m.buttonNodes.Push(makeButton(panel, spec, pad, y, inner, bh))
+            y += bh + gap
+        end for
+        if buttons.Count() > 0 then y -= gap
+    end if
+    y += 22
+    hint = Ui.makeLabel(panel, Ui.SANS, 15, Ui.INK_FAINT, "Back closes", { x: pad, y: y })
+    y += Ui.sizeOf(hint).h + pad - 8
+
+    bg.height = y
+    ring.height = y
+    shadow.width = pw + 96
+    shadow.height = y + 96
+    panel.translation = [Int((Ui.SCREEN_W - pw) / 2), Int((Ui.SCREEN_H - y) / 2)]
+    if m.top.focusIndex >= m.buttonNodes.Count() then m.top.focusIndex = 0
+    paintFocus()
+end sub
+
+function makeButton(parent as object, spec as object, x as integer, y as integer, w as integer, h as integer) as object
+    group = parent.CreateChild("Group")
+    group.translation = [x, y]
+    fill = Ui.makePanel(group, 0, 0, w, h, "0xFFFFFFFF", 0.05, 22)
+    ring = Ui.makeRing(group, 0, 0, w, h, "0xFFFFFFFF", 0.22, true)
+    color = Ui.INK
+    if spec.tone = "danger" then color = "0xFFB4A0FF"
+    text = Ui.makeLabel(group, Ui.SANS, 20, color, spec.text, { width: w, align: "center" })
+    text.translation = [0, Int((h - Ui.sizeOf(text).h) / 2)]
+    return { group: group, fill: fill, ring: ring }
+end function
+
+sub paintFocus()
+    for i = 0 to m.buttonNodes.Count() - 1
+        b = m.buttonNodes[i]
+        if i = m.top.focusIndex then
+            b.fill.blendColor = Ui.ACCENT
+            b.fill.opacity = 0.22
+            b.ring.blendColor = Ui.ACCENT
+            b.ring.opacity = 1.0
+        else
+            b.fill.blendColor = "0xFFFFFFFF"
+            b.fill.opacity = 0.05
+            b.ring.blendColor = "0xFFFFFFFF"
+            b.ring.opacity = 0.22
+        end if
+    end for
+end sub
+
+function onKeyEvent(key as string, press as boolean) as boolean
+    if not press then return true
+    n = m.buttonNodes.Count()
+    back = "up"
+    forward = "down"
+    if m.top.horizontal then
+        back = "left"
+        forward = "right"
+    end if
+    if key = back then
+        if n > 0 then m.top.focusIndex = (m.top.focusIndex - 1 + n) mod n
+        return true
+    else if key = forward then
+        if n > 0 then m.top.focusIndex = (m.top.focusIndex + 1) mod n
+        return true
+    else if key = "OK" then
+        if n > 0 then m.top.selected = m.top.buttons[m.top.focusIndex].id
+        return true
+    else if key = "back" then
+        m.top.cancelled = true
+        return true
+    end if
+    ' Everything else is swallowed while a menu is open.
+    return true
+end function
