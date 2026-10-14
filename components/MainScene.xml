@@ -14,6 +14,9 @@
         <field id="launchArgs" type="assocarray" />
     </interface>
     <children>
+        <!-- Probe decodes (Cache.bs) sit under everything, on screen: a Roku does
+             not load an image placed outside the visible area. -->
+        <Group id="decoders" />
         <Rectangle id="base" width="1920" height="1080" color="0x000000FF" />
         <Video id="keepAwake" width="2" height="2" enableUI="false" mute="true" loop="true" disableScreenSaver="true" />
         <Group id="layers">
@@ -21,7 +24,6 @@
             <ArtLayer id="layerB" opacity="0" />
         </Group>
         <Video id="artVideo" enableUI="false" mute="true" disableScreenSaver="true" visible="false" />
-        <Group id="decoders" translation="[-4000, 0]" />
         <Poster id="loading" uri="pkg:/images/ui/dot.png" width="14" height="14" translation="[953, 533]" blendColor="0x2B7FF5FF" opacity="0" />
         <PairingView id="pairing" visible="false" />
         <StatusView id="status" visible="false" />

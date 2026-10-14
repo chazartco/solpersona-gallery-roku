@@ -3,21 +3,48 @@
 ' are moved onto the monotonic scale here, so the clock (SPEC §5.1) sees
 ' sentAt / receivedAt on the same scale as now().
 
+' A task's thread starts some time after control = "RUN", and a request set
+' before it observes `request` is lost without a trace (on a real Roku the
+' very first call, register, was). So each task says `ready`, and requests
+' wait in a queue until it does.
+
 sub initRequests()
     m.reqSeq = 0
     m.pending = {}
     m.mediaPending = {}
+    m.apiQueue = []
+    m.mediaQueue = []
 
     m.api = CreateObject("roSGNode", "ApiTask")
     m.api.baseUrl = m.config.baseUrl
     if m.device <> invalid then m.api.token = m.device.token
     m.api.ObserveField("response", "onApiResponse")
+    m.api.ObserveField("ready", "onApiReady")
     m.api.control = "RUN"
 
     m.media = CreateObject("roSGNode", "MediaTask")
     m.media.ObserveField("response", "onMediaResponse")
     m.media.ObserveField("storage", "onStorage")
+    m.media.ObserveField("ready", "onMediaReady")
     m.media.control = "RUN"
+end sub
+
+sub onApiReady()
+    if not m.api.ready then return
+    queued = m.apiQueue
+    m.apiQueue = []
+    for each req in queued
+        m.api.request = req
+    end for
+end sub
+
+sub onMediaReady()
+    if not m.media.ready then return
+    queued = m.mediaQueue
+    m.mediaQueue = []
+    for each req in queued
+        m.media.request = req
+    end for
 end sub
 
 function apiSend(kind as string, method as string, path as string, body as string, auth as boolean, ctx as object) as integer
@@ -25,12 +52,38 @@ function apiSend(kind as string, method as string, path as string, body as strin
     ctx.kind = kind
     ctx.path = path
     ctx.method = method
+    ctx.sentMono = monoNow()
     m.pending[m.reqSeq.ToStr()] = ctx
     req = { id: m.reqSeq, method: method, path: path, body: body, auth: auth }
     if ctx.toFile <> invalid then req.toFile = ctx.toFile
-    m.api.request = req
+    if m.api.ready then
+        m.api.request = req
+    else
+        m.apiQueue.Push(req)
+    end if
     return m.reqSeq
 end function
+
+' Safety net, once a second: an answer that never came (a lost event, a
+' stuck transfer) is answered here as a network failure, so every loop —
+' pairing, sync, sample, QR — carries on with its usual backoff instead of
+' waiting for ever. ApiTask gives up on a transfer after 15 s itself.
+sub expireRequests()
+    now = monoNow()
+    for each key in Util.keysOf(m.pending)
+        ctx = m.pending[key]
+        if ctx <> invalid and now - Util.num(ctx.sentMono, now) > 40000 then
+            handleApiResponse({ id: Val(key, 10), status: 0, ok: false, network: true, code: "", lost: true, sentAt: Util.wallMs(), receivedAt: Util.wallMs() })
+        end if
+    end for
+    for each key in Util.keysOf(m.mediaPending)
+        ctx = m.mediaPending[key]
+        ' MediaTask drops a stalled download after 180 s.
+        if ctx <> invalid and now - Util.num(ctx.sentMono, now) > 200000 then
+            handleMediaResponse({ id: Val(key, 10), op: ctx.op, ok: false, status: 0, network: true, url: ctx.url, lost: true })
+        end if
+    end for
+end sub
 
 sub onApiResponse(event as object)
     try
@@ -71,8 +124,14 @@ function mediaSend(op as string, payload as object, ctx as object) as integer
     payload.id = m.reqSeq
     payload.op = op
     ctx.op = op
-    m.mediaPending[m.reqSeq.ToStr()] = ctx
-    m.media.request = payload
+    ctx.sentMono = monoNow()
+    ' `pin` is the only operation MediaTask does not answer.
+    if op <> "pin" then m.mediaPending[m.reqSeq.ToStr()] = ctx
+    if m.media.ready then
+        m.media.request = payload
+    else
+        m.mediaQueue.Push(payload)
+    end if
     return m.reqSeq
 end function
 
@@ -119,6 +178,7 @@ sub logCall(method as string, path as string, r as object)
     if q > 0 then shown = Left(path, q - 1)
     ms = Int(r.receivedAt - r.sentAt)
     note = Util.strOr(r.code, "")
+    if r.lost = true then note = "no answer"
     m.callLog.Unshift(Util.localHhmmss(Util.wallMs()) + " " + status + " " + method + " " + shown + " " + ms.ToStr() + "ms " + note)
     if m.callLog.Count() > 14 then m.callLog.Pop()
 end sub

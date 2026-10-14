@@ -152,11 +152,12 @@ sub startDecode(e as object)
     p.loadWidth = Ui.SCREEN_W
     p.loadHeight = Ui.SCREEN_H
     p.loadDisplayMode = "limitSize"
-    p.width = Ui.SCREEN_W
-    p.height = Ui.SCREEN_H
+    p.width = 4
+    p.height = 4
     m.decoderKeys[p.id] = e.key
     e.decoder = p
     e.status = "decoding"
+    e.decodeStarted = monoNow()
     p.ObserveField("loadStatus", "onDecoderStatus")
     p.uri = e.file
 end sub
@@ -246,12 +247,23 @@ sub manageCache(now as double)
     for each w in wanted
         advance(w.entry, decodeKeys.DoesExist(w.entry.key), slots)
     end for
-    ' A probe still decoding for a piece no longer due is let go.
+    ' A probe still decoding for a piece no longer due is let go; one that
+    ' has neither loaded nor failed in 20 s is treated as a failure, so a
+    ' decoder that never answers cannot hold the wall on the loading dot.
+    nowLocal = monoNow()
     for each key in m.cache
         e = m.cache[key]
-        if e.decoder <> invalid and e.status = "decoding" and not decodeKeys.DoesExist(key) then
-            releaseDecoder(e)
-            e.status = "fetched"
+        if e.decoder <> invalid and e.status = "decoding" then
+            if not decodeKeys.DoesExist(key) then
+                releaseDecoder(e)
+                e.status = "fetched"
+            else if nowLocal - Util.num(e.decodeStarted, nowLocal) > 20000 then
+                releaseDecoder(e)
+                e.error = "decode timeout " + Util.extensionOf(e.file)
+                m.badUrls[e.url] = true
+                e.ci += 1
+                e.status = "queued"
+            end if
         end if
     end for
     m.pinnedUrls = pins

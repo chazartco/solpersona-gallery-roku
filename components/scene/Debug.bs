@@ -24,6 +24,7 @@ sub renderDebug()
         lines.Push(kv("clock offset", "not synced"))
     end if
     lines.Push(kv("server now", Util.localHhmmss(now)))
+    lines.Push(kv("clocks", "wall " + Util.intString(Util.wallMs()) + " mono " + Util.intString(monoNow()) + " span " + Str(m.mono.span.TotalMilliseconds()).Trim()))
     if S.lastSyncAt <> invalid then lines.Push(kv("last sync", Util.intString((monoNow() - S.lastSyncAt) / 100) + "00 ms ago, " + Util.intString(Util.num(S.lastLatencyMs)) + " ms"))
     if m.nextSyncAt <> invalid then lines.Push(kv("next sync", Util.intString(Util.max(0, m.nextSyncAt - monoNow())) + " ms"))
     lines.Push(kv("screen", m.caps.screenWidth.ToStr() + "x" + m.caps.screenHeight.ToStr() + " originals " + boolText(m.caps.originals) + " vp9 " + boolText(m.vp9 = true)))

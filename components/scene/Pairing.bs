@@ -37,7 +37,7 @@ sub register()
     m.P.registration = invalid
     storeDelete("pairing")
     paintPairing()
-    body = { platform: APP_PLATFORM, appVersion: m.appVersion, capabilities: m.caps }
+    body = { "platform": APP_PLATFORM, "appVersion": m.appVersion, "capabilities": m.caps }
     if m.config.name <> "" then body.name = Left(m.config.name, 60)
     apiSend("register", "POST", "/api/v1/device/register", FormatJson(body), false, { run: m.pairRun })
 end sub
@@ -92,7 +92,7 @@ sub onPairTimer()
         register()
         return
     end if
-    apiSend("token", "POST", "/api/v1/device/token", FormatJson({ deviceCode: m.P.registration.deviceCode }), false, { run: m.pairRun })
+    apiSend("token", "POST", "/api/v1/device/token", FormatJson({ "deviceCode": m.P.registration.deviceCode }), false, { run: m.pairRun })
 end sub
 
 ' Given exactly once: on flash before anything else (SPEC §3.3).

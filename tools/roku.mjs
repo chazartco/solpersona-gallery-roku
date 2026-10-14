@@ -21,7 +21,7 @@ const root = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 if (existsSync(join(root, '.env'))) {
   for (const line of readFileSync(join(root, '.env'), 'utf8').split('\n')) {
     const m = /^\s*([A-Z_]+)\s*=\s*(.*)\s*$/.exec(line);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
   }
 }
 

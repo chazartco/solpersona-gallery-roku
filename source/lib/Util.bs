@@ -12,9 +12,14 @@ namespace Util
         return fallback + 0#
     end function
 
+    ' Intrinsic numbers report "Integer", "Float", "Double", "LongInteger";
+    ' boxed ones — what a Roku hands over when an AA crosses from a Task to
+    ' the render thread — report "roInt", "roFloat", "roDouble",
+    ' "roIntrinsicDouble", "roLongInteger". Missing "roInt" here once made
+    ' every slot length 0 on a real Roku (the simulator never boxes).
     function isNumber(value as dynamic) as boolean
         t = LCase(type(value))
-        return t = "integer" or t = "rointeger" or t = "longinteger" or t = "rolonginteger" or t = "float" or t = "rofloat" or t = "double" or t = "rodouble" or t = "rointrinsicdouble"
+        return t = "integer" or t = "roint" or t = "rointeger" or t = "longinteger" or t = "rolonginteger" or t = "float" or t = "rofloat" or t = "double" or t = "rodouble" or t = "rointrinsicdouble"
     end function
 
     function isString(value as dynamic) as boolean
@@ -231,24 +236,32 @@ namespace Util
     ' Local time of day, in minutes since midnight, at an epoch instant. The
     ' schedule is in the screen's own time zone (SPEC §8).
     function localMinutesAt(epochMs as double) as integer
-        dt = CreateObject("roDateTime")
-        dt.FromSeconds(Int(epochMs / 1000#))
-        dt.ToLocalTime()
-        return dt.GetHours() * 60 + dt.GetMinutes()
+        return Util.localSecondOfDay(epochMs) \ 60
     end function
 
     function localHhmm(epochMs as double) as string
-        dt = CreateObject("roDateTime")
-        dt.FromSeconds(Int(epochMs / 1000#))
-        dt.ToLocalTime()
-        return Util.pad2(dt.GetHours()) + ":" + Util.pad2(dt.GetMinutes())
+        s = Util.localSecondOfDay(epochMs)
+        return Util.pad2(s \ 3600) + ":" + Util.pad2((s \ 60) mod 60)
     end function
 
     function localHhmmss(epochMs as double) as string
+        s = Util.localSecondOfDay(epochMs)
+        return Util.pad2(s \ 3600) + ":" + Util.pad2((s \ 60) mod 60) + ":" + Util.pad2(s mod 60)
+    end function
+
+    ' Seconds since local midnight at an epoch instant, worked out from the
+    ' current local time plus the difference. roDateTime.FromSeconds() did
+    ' not take effect on a Roku Ultra running OS 16 (every time read back as
+    ' the same instant), so it is not used.
+    function localSecondOfDay(epochMs as double) as integer
         dt = CreateObject("roDateTime")
-        dt.FromSeconds(Int(epochMs / 1000#))
+        nowMs = dt.AsSeconds() * 1000# + dt.GetMilliseconds()
         dt.ToLocalTime()
-        return Util.pad2(dt.GetHours()) + ":" + Util.pad2(dt.GetMinutes()) + ":" + Util.pad2(dt.GetSeconds())
+        nowSec = dt.GetHours() * 3600 + dt.GetMinutes() * 60 + dt.GetSeconds() + dt.GetMilliseconds() / 1000#
+        t = Util.floor(nowSec + (epochMs - nowMs) / 1000#)
+        day = 86400#
+        t = t - Util.floor(t / day) * day
+        return Int(t)
     end function
 
 end namespace

@@ -13,6 +13,7 @@ end sub
 sub runTask()
     port = CreateObject("roMessagePort")
     m.top.ObserveField("request", port)
+    m.top.ready = true
     inflight = {}
     while true
         msg = Wait(250, port)

@@ -18,9 +18,28 @@ been verified, where, and how.
 |---|---|---|---|---|---|
 | Roku TV | _e.g. TCL 55S455 (C-series)_ | | | | |
 | Roku stick | _e.g. Streaming Stick 4K 3820_ | | | | |
-| (optional) Roku Ultra | | | | | |
+| Roku Ultra | 4800X | 16.0.4 build 834 | 1080p UI | USB (not yet tested) | first run, 2026-10-14 |
 
 Model and OS: **Settings → System → About**. Video output: **Settings → Display type**.
+
+## First hardware run — Roku Ultra 4800X, OS 16.0.4 (2026-10-14)
+
+Pairing against production (QR, code, /token polling every 3 s) and **Try a
+sample gallery** (BLUR wash, museum card, QR, "Link this screen" card, pieces
+changing on the clock) work. Five problems that the simulation engine could
+not show were found and fixed on this run:
+
+| Symptom on the TV | Cause | Fix |
+|---|---|---|
+| "Asking for a code…", no QR | `register` was sent before ApiTask listened; the request vanished | tasks signal `ready`; requests queue until then; a 40 s watchdog answers lost requests as network failures |
+| `/token` → 422 VALIDATION_FAILED | unquoted AA literal keys are stored lower-case on a Roku; FormatJson sent `devicecode` | every server-bound key is quoted (`"deviceCode"`) |
+| Sample: blue dot for ever, debug `lap 0:00` | numbers crossing Task → render thread are boxed (`roInt`), which the number check did not know | `Util.isNumber` accepts boxed types (test added) |
+| Sample images never decoded | production image URLs have no extension; files were saved as `.bin` | MediaTask names files by their first bytes (WebP/JPEG/PNG/GIF/MP4) |
+| Every debug time read the same instant | `roDateTime.FromSeconds` had no effect | local time computed from now + difference (test added) |
+
+Also moved the probe decoders on-screen (hidden under the wall) with a 20 s
+timeout. The Ultra is a player, so its results go in the
+"Stick" column below.
 
 ## Image formats (per device)
 
@@ -31,7 +50,7 @@ overlay (OK → Debug overlay), and watch the CACHE section: a ready entry shows
 
 | Format | Expected | Roku TV | Stick |
 |---|---|---|---|
-| WebP display/poster copy | decodes (OS ≥ 9.4) | | |
+| WebP display/poster copy | decodes (OS ≥ 9.4) | | ✅ Roku Ultra 4800X (a player, not a stick), production sample |
 | JPEG original, 6000×4000 | decodes at ≤1920×1080 | | |
 | PNG original, 4000×4000 | decodes (watch for memory warnings on old models) | | |
 | GIF (animated) | first frame | | |

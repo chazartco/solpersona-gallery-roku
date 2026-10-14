@@ -14,5 +14,7 @@
         <field id="response" type="assocarray" />
         <field id="token" type="string" />
         <field id="baseUrl" type="string" />
+        <!-- true once the task listens; requests set before then would be lost -->
+        <field id="ready" type="boolean" value="false" />
     </interface>
 </component>

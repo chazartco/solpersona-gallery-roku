@@ -15,6 +15,7 @@ sub initKept()
     m.kept = {
         on: false          ' keeping, as last answered by sync (or restored at boot)
         files: {}          ' url → bytes, for everything on the stick
+        paths: {}          ' url → its file on the stick (MediaTask names it by content)
         items: {}          ' itemId → { state, attempts, nextAt }: loading|stored|waiting|failed|room
         running: 0         ' downloads in flight
         reconciled: false  ' files{} has been read back from the stick
@@ -31,12 +32,10 @@ function keptAvailable() as boolean
     return m.storage.extWritable = true
 end function
 
-' The stick's file for a URL, when it holds one. Named exactly as MediaTask names it.
+' The stick's file for a URL, when it holds one.
 function keptPathFor(url as string) as dynamic
     if not m.kept.on or not m.kept.files.DoesExist(url) then return invalid
-    ext = Util.extensionOf(url)
-    if ext = "" then ext = "bin"
-    return m.storage.ext + "/solpersona/media/" + md5(url) + "." + ext
+    return m.kept.paths[url]
 end function
 
 ' At start-up: a screen that was keeping its show goes on doing so — before any network.
@@ -97,6 +96,7 @@ sub dropKept()
     m.kept.gen += 1
     m.kept.on = false
     m.kept.files = {}
+    m.kept.paths = {}
     m.kept.items = {}
     m.kept.running = 0
     m.kept.reconciled = false
@@ -121,6 +121,7 @@ end sub
 sub onKeptListed(r as object, ctx as object)
     if ctx.gen <> m.kept.gen or not m.kept.on then return
     if Util.isAA(r.files) then m.kept.files = r.files
+    if Util.isAA(r.paths) then m.kept.paths = r.paths
     m.kept.reconciled = true
     tick()
 end sub
@@ -225,7 +226,10 @@ end sub
 sub onKeptFetched(r as object, ctx as object)
     if ctx.gen <> m.kept.gen then return
     if ctx.stillOnly = true then
-        if r.ok = true then m.kept.files[ctx.url] = Util.num(r.bytes)
+        if r.ok = true then
+            m.kept.files[ctx.url] = Util.num(r.bytes)
+            m.kept.paths[ctx.url] = r.path
+        end if
         return
     end if
     st = m.kept.items[ctx.itemId]
@@ -236,6 +240,7 @@ sub onKeptFetched(r as object, ctx as object)
     now = monoNow()
     if r.ok = true then
         m.kept.files[ctx.url] = Util.num(r.bytes)
+        m.kept.paths[ctx.url] = r.path
         m.kept.running = Util.max(0, m.kept.running - 1)
         st.state = "stored"
         ' The wash and the poster, offline too (best effort).

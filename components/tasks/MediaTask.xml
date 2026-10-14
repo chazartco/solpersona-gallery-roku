@@ -13,6 +13,7 @@
         <field id="request" type="assocarray" />
         <field id="response" type="assocarray" />
         <field id="storage" type="assocarray" />
+        <field id="ready" type="boolean" value="false" />
         <!-- Development only: use this volume as "the stick" (e.g. "cachefs:") to
              exercise keepOffline where no writable stick is at hand. -->
         <field id="keepVolume" type="string" />

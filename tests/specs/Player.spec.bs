@@ -63,6 +63,30 @@ namespace tests
             m.assertInvalid(Iso.toMs(invalid))
         end function
 
+        @it("treats boxed numbers as numbers (Task → render thread)")
+        function _()
+            boxed = CreateObject("roInt")
+            boxed.SetInt(12000)
+            m.assertTrue(Util.isNumber(boxed), "roInt")
+            m.assertEqual(Util.num(boxed), 12000#)
+            f = CreateObject("roFloat")
+            f.SetFloat(1.5)
+            m.assertTrue(Util.isNumber(f), "roFloat")
+            m.assertFalse(Util.isNumber("12000"))
+            m.assertFalse(Util.isNumber(invalid))
+        end function
+
+        @it("tells the local time of any instant, not just now")
+        function _()
+            now = Util.wallMs()
+            a = Util.localSecondOfDay(now)
+            b = Util.localSecondOfDay(now + 3600000#)
+            m.assertEqual((b - a + 86400) mod 86400, 3600)
+            c = Util.localSecondOfDay(now - 90000#)
+            m.assertEqual((a - c + 86400) mod 86400, 90)
+            m.assertTrue(a >= 0 and a < 86400)
+        end function
+
         @it("floors large doubles")
         function _()
             m.assertEqual(Util.floor(1760290000000.9#), 1760290000000#)

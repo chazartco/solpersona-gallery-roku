@@ -317,12 +317,27 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (path === '/api/v1/device/sample' && req.method === 'GET') {
-      const list = items(req).slice(0, 4);
+      // Like production's sample: image URLs with no file extension, WebP inside.
+      const b = base(req);
+      const list = items(req).slice(0, 4).map((it) => {
+        const n = it.id.replace(/\D/g, '');
+        const img = (w) => `${b}/api/v1/device/sample/image/p${n}?w=${w}`;
+        return { ...it, media: { original: img(2400), display: img(1000), poster: img(600), fallbacks: [] } };
+      });
       const day = new Date(); day.setUTCHours(0, 0, 0, 0);
       return json(res, 200, { serverTime: Date.now(), pollMs: 60000,
         show: { id: 'sample', version: 3, sourceRef: 'sample', epochMs: day.getTime(), pausedAtMs: null,
           settings: { ...DEFAULTS, slideSeconds: 10, fit: 'FRAME', frameStyle: 'WALNUT', captionStyle: 'MINIMAL', captionCorner: 'BOTTOM_LEFT', qrCorner: 'BOTTOM_RIGHT' },
           items: list, timeline: list.map((i) => ({ id: i.id, ms: 10000 })) } });
+    }
+
+    const sampleImage = /^\/api\/v1\/device\/sample\/image\/p(\d+)$/.exec(path);
+    if (sampleImage && req.method === 'GET') {
+      const w = Number(q.w || 1000);
+      const file = media.get(`p${sampleImage[1]}-${w >= 2000 ? 'display' : w >= 1000 ? 'display' : 'poster'}.webp`);
+      if (!file) return error(res, 404, 'NOT_FOUND', 'No such sample image.');
+      res.writeHead(200, { 'Content-Type': 'image/webp', 'Content-Length': file.body.length });
+      return res.end(file.body);
     }
 
     if ((path === '/api/v1/device/qr' || path === '/api/v1/device/sample/qr') && req.method === 'GET') {

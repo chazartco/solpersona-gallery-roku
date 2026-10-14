@@ -30,6 +30,7 @@ sub runTask()
     m.top.ObserveField("request", port)
     m.top.ObserveField("keepVolume", port)
     m.fs.SetMessagePort(port)
+    m.top.ready = true
     inflight = {}
     lastLruSave = Util.wallMs()
     m.lruDirty = false
@@ -74,19 +75,19 @@ sub handle(req as object, port as object, inflight as object)
         m.pinned = {}
         if Util.isArray(req.urls) then
             for each url in req.urls
-                m.pinned[nameFor(url)] = true
+                m.pinned[stemFor(url)] = true
             end for
         end if
     else if op = "clearCache" then
         keep = {}
         if Util.isArray(req.keep) then
             for each url in req.keep
-                keep[nameFor(url)] = true
+                keep[stemFor(url)] = true
             end for
         end if
         dir = m.top.storage.cacheDir
         for each name in m.fs.GetDirectoryListing(dir)
-            if not keep.DoesExist(name) then
+            if not keep.DoesExist(Left(name, 32)) then
                 m.fs.Delete(dir + name)
                 m.lru.Delete(name)
             end if
@@ -94,7 +95,8 @@ sub handle(req as object, port as object, inflight as object)
         m.lruDirty = true
         reply(req, { ok: true })
     else if op = "keptList" then
-        reply(req, { ok: true, files: readKeptIndex() })
+        files = readKeptIndex()
+        reply(req, { ok: true, files: files, paths: keptPaths(files) })
     else if op = "keptPrune" then
         keep = {}
         if Util.isArray(req.keep) then
@@ -105,12 +107,13 @@ sub handle(req as object, port as object, inflight as object)
         files = readKeptIndex()
         for each url in Util.keysOf(files)
             if not keep.DoesExist(url) then
-                m.fs.Delete(keptDir() + nameFor(url))
+                found = findFile(keptDir(), url)
+                if found <> invalid then m.fs.Delete(found)
                 files.Delete(url)
             end if
         end for
         writeKeptIndex(files)
-        reply(req, { ok: true, files: files })
+        reply(req, { ok: true, files: files, paths: keptPaths(files) })
     else if op = "keptReset" then
         dir = keptDir()
         if m.fs.Exists(dir) then
@@ -119,7 +122,7 @@ sub handle(req as object, port as object, inflight as object)
             end for
         end if
         writeKeptIndex({})
-        reply(req, { ok: true, files: {} })
+        reply(req, { ok: true, files: {}, paths: {} })
     else if op = "writeText" then
         ok = WriteAsciiFile(req.path, req.text)
         reply(req, { ok: ok })
@@ -135,18 +138,18 @@ sub startDownload(req as object, port as object, inflight as object)
     else
         dir = m.top.storage.cacheDir
     end if
-    name = nameFor(req.url)
-    path = dir + name
-    if m.fs.Exists(path) then
+    path = findFile(dir, req.url)
+    if path <> invalid then
         bytes = sizeOf(path)
         if bytes > 0 then
-            if not kept then touch(name, bytes)
+            if not kept then touch(Mid(path, Len(dir) + 1), bytes)
             reply(req, { ok: true, path: path, bytes: bytes, url: req.url, cached: true })
             return
         end if
         m.fs.Delete(path)
     end if
     if not kept then makeRoom()
+    stem = dir + stemFor(req.url)
 
     xfer = CreateObject("roUrlTransfer")
     xfer.SetMessagePort(port)
@@ -156,14 +159,14 @@ sub startDownload(req as object, port as object, inflight as object)
         xfer.InitClientCertificates()
     end if
     ' Media never takes the token (SPEC §6.1); a CDN may redirect.
-    part = path + ".part"
+    part = stem + ".part"
     if not xfer.AsyncGetToFile(part) then
         reply(req, { ok: false, status: 0, network: true, url: req.url })
         return
     end if
     ' Originals can be tens of megabytes; a stalled transfer is dropped after
     ' three minutes and retried later by the scene.
-    inflight[xfer.GetIdentity().ToStr()] = { xfer: xfer, req: req, part: part, path: path, name: name, kept: kept, deadline: Util.wallMs() + 180000 }
+    inflight[xfer.GetIdentity().ToStr()] = { xfer: xfer, req: req, part: part, stem: stem, dir: dir, kept: kept, deadline: Util.wallMs() + 180000 }
 end sub
 
 sub finishDownload(msg as object, inflight as object)
@@ -177,22 +180,75 @@ sub finishDownload(msg as object, inflight as object)
         reply(job.req, { ok: false, status: Util.max(0, code), network: code <= 0, url: job.req.url })
         return
     end if
-    if not m.fs.Rename(job.part, job.path) then
+    ' The decoder goes by the file's extension, and many media URLs have none
+    ' (SolPersona's own sample images are `…/image/<name>?w=1000`, WebP).
+    ' The extension comes from the URL when it has a known one, else from the
+    ' file's first bytes.
+    ext = knownExtension(job.req.url)
+    if ext = "" then ext = sniffExtension(job.part)
+    path = job.stem + "." + ext
+    m.fs.Delete(path)
+    if not m.fs.Rename(job.part, path) then
         ' Out of room, or the volume refused the write.
         m.fs.Delete(job.part)
         reply(job.req, { ok: false, status: code, network: false, url: job.req.url, full: true })
         return
     end if
-    bytes = sizeOf(job.path)
+    bytes = sizeOf(path)
     if job.kept then
         files = readKeptIndex()
         files[job.req.url] = bytes
         writeKeptIndex(files)
     else
-        touch(job.name, bytes)
+        touch(Mid(path, Len(job.dir) + 1), bytes)
     end if
-    reply(job.req, { ok: true, path: job.path, bytes: bytes, url: job.req.url })
+    reply(job.req, { ok: true, path: path, bytes: bytes, url: job.req.url })
 end sub
+
+const MEDIA_EXTENSIONS = "jpg,jpeg,png,gif,webp,bmp,mp4,m4v,mov,mkv,webm"
+
+function knownExtension(url as string) as string
+    ext = Util.extensionOf(url)
+    if ext <> "" and Instr(1, "," + MEDIA_EXTENSIONS + ",", "," + ext + ",") > 0 then return ext
+    return ""
+end function
+
+' What a file is, from its first bytes.
+function sniffExtension(path as string) as string
+    b = CreateObject("roByteArray")
+    if not b.ReadFile(path, 0, 16) or b.Count() < 12 then return "bin"
+    if b[0] = &h52 and b[1] = &h49 and b[2] = &h46 and b[3] = &h46 and b[8] = &h57 and b[9] = &h45 and b[10] = &h42 and b[11] = &h50 then return "webp"
+    if b[0] = &hFF and b[1] = &hD8 and b[2] = &hFF then return "jpg"
+    if b[0] = &h89 and b[1] = &h50 and b[2] = &h4E and b[3] = &h47 then return "png"
+    if b[0] = &h47 and b[1] = &h49 and b[2] = &h46 and b[3] = &h38 then return "gif"
+    if b[4] = &h66 and b[5] = &h74 and b[6] = &h79 and b[7] = &h70 then return "mp4"
+    if b[0] = &h1A and b[1] = &h45 and b[2] = &hDF and b[3] = &hA3 then return "mkv"
+    if b[0] = &h42 and b[1] = &h4D then return "bmp"
+    return "bin"
+end function
+
+' The file already held for a URL in `dir`, whatever extension it was given.
+function findFile(dir as string, url as string) as dynamic
+    stem = dir + stemFor(url)
+    ext = knownExtension(url)
+    if ext <> "" then
+        if m.fs.Exists(stem + "." + ext) then return stem + "." + ext
+        return invalid
+    end if
+    for each candidate in ["webp", "jpg", "png", "gif", "mp4", "mkv", "bmp", "bin"]
+        if m.fs.Exists(stem + "." + candidate) then return stem + "." + candidate
+    end for
+    return invalid
+end function
+
+function keptPaths(files as object) as object
+    out = {}
+    for each url in files
+        found = findFile(keptDir(), url)
+        if found <> invalid then out[url] = found
+    end for
+    return out
+end function
 
 function sizeOf(path as string) as double
     info = m.fs.Stat(path)
@@ -200,15 +256,12 @@ function sizeOf(path as string) as double
     return 0#
 end function
 
-' A stable file name for a URL: its MD5 plus the extension the decoder needs.
-function nameFor(url as string) as string
+' A stable file name stem for a URL: its MD5 (32 hex characters).
+function stemFor(url as string) as string
     ba = CreateObject("roByteArray")
     ba.FromAsciiString(url)
     m.digest.Setup("md5")
-    hex = m.digest.Process(ba)
-    ext = Util.extensionOf(url)
-    if ext = "" then ext = "bin"
-    return hex + "." + ext
+    return m.digest.Process(ba)
 end function
 
 ' --- Streaming cache LRU ----------------------------------------------------------
@@ -252,7 +305,7 @@ sub makeRoom()
     dir = m.top.storage.cacheDir
     for each entry in names
         if (total < budget * 0.8 and m.lru.Count() < 150) then exit for
-        if not m.pinned.DoesExist(entry.name) then
+        if not m.pinned.DoesExist(Left(entry.name, 32)) then
             total -= Util.num(m.lru[entry.name][0])
             m.fs.Delete(dir + entry.name)
             m.lru.Delete(entry.name)
@@ -277,7 +330,7 @@ function readKeptIndex() as object
         if Util.isAA(data) then
             ' The index can be ahead of the disk (a pulled stick, a crash).
             for each url in Util.keysOf(data)
-                if not m.fs.Exists(keptDir() + nameFor(url)) then data.Delete(url)
+                if findFile(keptDir(), url) = invalid then data.Delete(url)
             end for
             return data
         end if

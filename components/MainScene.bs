@@ -161,13 +161,14 @@ function computeCaps() as object
     persistent = m.storage.extWritable = true
     storageMb = m.storage.cacheBudgetMb
     if persistent then storageMb = Int(Util.min(10000000, m.storage.extFreeMb + keptMegabytes()))
+    ' Quoted: these keys go to the server as written (see SyncLogic.buildBody).
     return {
-        screenWidth: size.w
-        screenHeight: size.h
-        storageMb: storageMb
-        video: true
-        originals: canHoldOriginals(info)
-        persistentStorage: persistent
+        "screenWidth": size.w
+        "screenHeight": size.h
+        "storageMb": storageMb
+        "video": true
+        "originals": canHoldOriginals(info)
+        "persistentStorage": persistent
     }
 end function
 
@@ -249,6 +250,7 @@ end sub
 ' --- Timers ----------------------------------------------------------------------------------
 
 sub everySecond()
+    expireRequests()
     logOfflinePlay()
     paintPairingCountdown()
     paintIdleClock()

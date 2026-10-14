@@ -107,14 +107,14 @@ function reportState() as object
     cur = m.layers[m.front]
     t = m.target
     st = {
-        itemId: cur.itemId
-        index: cur.index
-        paused: t <> invalid and t.paused = true
-        cached: countReady()
-        bufferedAhead: bufferedAhead()
-        error: m.S.lastError
+        "itemId": cur.itemId
+        "index": cur.index
+        "paused": t <> invalid and t.paused = true
+        "cached": countReady()
+        "bufferedAhead": bufferedAhead()
+        "error": m.S.lastError
         ' Honest: false while dark (outside the schedule) — SPEC §4.1.
-        visible: not m.blackout
+        "visible": not m.blackout
     }
     if st.error = invalid and m.kept.error <> invalid then st.error = m.kept.error
     if m.kept.on then

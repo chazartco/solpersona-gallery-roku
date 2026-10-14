@@ -51,24 +51,32 @@ namespace SyncLogic
         sentDurations = []
         for each id in S.pendingDurations
             if sentDurations.Count() >= 50 then exit for
-            sentDurations.Push({ itemId: id, ms: Int(S.pendingDurations[id]) })
+            sentDurations.Push({ "itemId": id, "ms": Int(S.pendingDurations[id]) })
         end for
         full = S.forceFull or S.show = invalid
-        body = {
-            showId: invalid
-            version: invalid
-            ackSeq: S.ackSeq
-            durations: sentDurations
-        }
-        ' Brackets, not dots: BrightScript stores a key assigned with a dot in
-        ' lower case, and FormatJson would send "showid" / "appversion".
+        showId = invalid
+        version = invalid
         if not full then
-            body["showId"] = S.show.id
-            body["version"] = S.show.version
+            showId = S.show.id
+            version = S.show.version
         end if
-        if extra.state <> invalid then body["state"] = extra.state
-        if extra.capabilities <> invalid then body["capabilities"] = extra.capabilities
-        if extra.appVersion <> invalid then body["appVersion"] = extra.appVersion
+        ' Every key that goes on the wire is QUOTED. On a Roku, an unquoted
+        ' literal key (or one set with a dot) is stored in lower case and
+        ' FormatJson sends "showid" — only quoted literal keys keep their case
+        ' (Roku OS 8+). The simulator keeps case either way, so tests cannot
+        ' catch this: quote every server-bound key.
+        body = {
+            "showId": showId
+            "version": version
+            "ackSeq": S.ackSeq
+            "durations": sentDurations
+            "state": extra.state
+            "capabilities": extra.capabilities
+            "appVersion": extra.appVersion
+        }
+        for each key in ["state", "capabilities", "appVersion"]
+            if body[key] = invalid then body.Delete(key)
+        end for
         plays = []
         if Util.isArray(extra.plays) then plays = extra.plays
         return { body: body, sentDurations: sentDurations, plays: plays, sentPlays: plays.Count() }
