@@ -319,6 +319,23 @@ sub clearCache(all as boolean)
     end for
 end sub
 
+' Memory running short: let go of every picture not on the wall (the next
+' ones are decoded again from their files when due); when the whole Roku is
+' critical, the cached files too. At most once a minute.
+sub onMemoryWarning()
+    w = m.media.memoryWarning
+    if not Util.isAA(w) then return
+    m.lastMemoryWarning = w
+    now = monoNow()
+    if m.memoryTrimmedAt <> invalid and now - m.memoryTrimmedAt < 60000 then return
+    m.memoryTrimmedAt = now
+    if w.level = "critical" then
+        clearCacheCommand()
+    else
+        clearCache(false)
+    end if
+end sub
+
 ' The `clear-cache` command: cached files too, keeping what is on the wall.
 sub clearCacheCommand()
     clearCache(false)

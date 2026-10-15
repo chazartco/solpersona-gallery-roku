@@ -162,7 +162,6 @@ end sub
 
 sub openKeyboard(purpose as string, title as string, text as string, note as string)
     dialog = CreateObject("roSGNode", "StandardKeyboardDialog")
-    if dialog = invalid then dialog = CreateObject("roSGNode", "KeyboardDialog")
     dialog.title = title
     dialog.text = text
     dialog.buttons = ["Save", "Cancel"]

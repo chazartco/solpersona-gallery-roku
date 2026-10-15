@@ -120,7 +120,7 @@ end sub
 
 function appVersionText() as string
     info = CreateObject("roAppInfo")
-    return info.GetVersion()
+    return info.GetValue("major_version") + "." + info.GetValue("minor_version") + "." + info.GetValue("build_version")
 end function
 
 ' --- What the app keeps ----------------------------------------------------------------
@@ -193,6 +193,9 @@ function canHoldOriginals(info as object) as boolean
     if mem = invalid then return true
     available = mem.GetChannelAvailableMemory()
     if Util.isNumber(available) and available > 0 and available < 120 * 1024 then return false
+    ' A channel allowed under ~200 MB in all (KB) keeps to the display copies.
+    limit = mem.GetChannelMemoryLimit()
+    if Util.isNumber(limit) and limit > 0 and limit < 200 * 1024 then return false
     return true
 end function
 

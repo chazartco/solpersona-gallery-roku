@@ -103,8 +103,10 @@ make soak                      # 8 hours by default
 
 Also, by hand:
 
-- Run Roku's **Static Analysis** tool (from the developer site) on
-  `build/solpersona-gallery-roku.zip` and fix anything marked error.
+- Run Roku's **Static Analysis** (Developer Dashboard → the channel →
+  Static Analysis) on the `.pkg`. Fix anything marked **Mistake**. See
+  [Static Analysis results](#static-analysis-results) for what the first run
+  found and what each finding means.
 - Check the basics on the TV: the pairing screen and QR, **Try a sample
   gallery**, linking with a code, OK overlay → **Forget this account**, and
   Back → **Leave the gallery?** → Leave.
@@ -154,6 +156,15 @@ channel (the type is "SDK"/"Public", not "Beta" or "Non-certified").
 ### 9. Upload and write the reviewer notes
 
 Upload `build/solpersona-gallery-roku.pkg` (the one the soak test signed).
+Set **minimum firmware** to **15.1** (or the closest version above it in the
+list): the channel uses RSG 1.3, which Roku requires to run on OS 15.1 or
+later.
+
+In the channel's properties, **don't** select a customer-account or
+subscription requirement that implies Roku Pay. The channel is free, sells
+nothing, and has no sign-up or sign-in form (it links by code). Those
+settings make Static Analysis demand Roku Pay features (`getUserData`, the
+Partner Payouts Program).
 Then add these notes, filling in the brackets:
 
 > **What it is.** An ambient art display. A SolPersona user links the screen
@@ -244,3 +255,20 @@ sessions (see [What you need](#what-you-need)). If it can't read memory, the
 run stops at once and says why. Leave the TV on, and don't touch the remote for
 the length of the run. Roku screenshots leave out video, so a film shows as
 black in them; that's expected.
+
+---
+
+## Static Analysis results
+
+First run, version 1.0.2 (2026-10-15):
+
+| Finding | What it meant | Done |
+|---|---|---|
+| RSG 1.3 needs minimum firmware 15.1 | Dashboard setting | Set 15.1 on upload (step 9) |
+| `getUserData` required for authenticated channels (RP 2.1/4.1, 2.2); "Customer Account Requirement" selected without the Partner Payouts Program | Triggered by the channel properties: those rules are for channels that sign people up or sell through Roku Pay | Clear that property (step 9). If Roku still requires on-device sign-up, adding Roku's Request for Information (email) needs a new SolPersona endpoint ([QUESTIONS.md](QUESTIONS.md) §2) |
+| `InitClientCertificates()` deprecated (×3) | Only needed for client-certificate servers; HTTPS needs only the CA bundle | Removed |
+| `GetVersion()` deprecated | Was `roAppInfo.GetVersion()` | Version is read from the manifest fields |
+| Manifest `subtitle` deprecated | — | Removed |
+| Memory monitoring not found (`EnableMemoryWarningEvent`, `EnableLowGeneralMemoryEvent`, `GetMemoryLimitPercent`, `GetChannelMemoryLimit`) | Roku wants channels to react to low memory | The media task listens for both events. On a warning the scene lets go of every picture not on the wall, plus cached files when the Roku is critical. The debug overlay shows memory as a percentage of the limit |
+| `KeyboardDialog` not valid for voice entry | Was only a fallback for old firmware | `StandardKeyboardDialog` only |
+

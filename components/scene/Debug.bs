@@ -28,6 +28,11 @@ sub renderDebug()
     if S.lastSyncAt <> invalid then lines.Push(kv("last sync", Util.intString((monoNow() - S.lastSyncAt) / 100) + "00 ms ago, " + Util.intString(Util.num(S.lastLatencyMs)) + " ms"))
     if m.nextSyncAt <> invalid then lines.Push(kv("next sync", Util.intString(Util.max(0, m.nextSyncAt - monoNow())) + " ms"))
     lines.Push(kv("screen", m.caps.screenWidth.ToStr() + "x" + m.caps.screenHeight.ToStr() + " originals " + boolText(m.caps.originals) + " vp9 " + boolText(m.vp9 = true)))
+    mem = CreateObject("roAppMemoryMonitor")
+    memText = Util.intString(mem.GetMemoryLimitPercent()) + "% of the channel's limit"
+    w = m.lastMemoryWarning
+    if Util.isAA(w) then memText = memText + " · last warning " + Util.strOr(w.level, "?")
+    lines.Push(kv("memory", memText))
     lines.Push(kv("error", Util.strOr(S.lastError, "—")))
     if Util.num(m.internalFailures) > 0 then lines.Push(kv("caught", Util.intString(m.internalFailures) + " internal errors"))
     if m.filmLog.Count() > 0 then

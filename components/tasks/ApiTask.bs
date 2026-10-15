@@ -37,7 +37,6 @@ sub startRequest(req as object, port as object, inflight as object)
     xfer.SetUrl(base + req.path)
     if LCase(Left(base, 8)) = "https://" then
         xfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
-        xfer.InitClientCertificates()
     end if
     xfer.RetainBodyOnError(true)
     xfer.AddHeader("Accept", "application/json")

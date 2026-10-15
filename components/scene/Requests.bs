@@ -26,6 +26,7 @@ sub initRequests()
     m.media.ObserveField("response", "onMediaResponse")
     m.media.ObserveField("storage", "onStorage")
     m.media.ObserveField("ready", "onMediaReady")
+    m.media.ObserveField("memoryWarning", "onMemoryWarning")
     m.media.control = "RUN"
 end sub
 
