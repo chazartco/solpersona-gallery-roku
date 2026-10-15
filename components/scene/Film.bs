@@ -6,23 +6,32 @@
 ' and does not fade with them, so the still fades and the film then takes
 ' over (and stops before the next fade begins).
 '
-' MP4 (H.264/AAC) plays; WebM/VP9 shows the still for the slot unless this
-' Roku says it can decode VP9. Muted unless videoSound. A screen joining
-' mid-slot starts at offsetMs mod duration; whole plays loop until the slot
-' ends; an estimated slot lets the play finish (Planner.shouldHoldVideo).
+' What a film is comes from a HEAD request made when its entry is created
+' (Cache.ensureEntry): many media URLs have no extension, and a WebM handed
+' to the Video node as "mp4" fails. MP4 (H.264/AAC) plays; WebM/VP9 plays
+' only where this Roku says it decodes VP9, else the still shows for the
+' slot. A film that errors tries its next copy (fallbacks), then its still.
+' Muted unless videoSound. A screen joining mid-slot starts at offsetMs mod
+' duration; whole plays loop until the slot ends; an estimated slot lets the
+' play finish (Planner.shouldHoldVideo).
 '
 ' The screensaver: a SceneGraph app with no playing video lets the Roku
 ' screensaver start. A wall must not be interrupted, so a tiny silent black
 ' clip (media/keepawake.mp4) loops under everything, hidden, with
 ' disableScreenSaver set — the documented way to hold off the screensaver.
-' See docs/QUESTIONS.md about certification rule 4.5. It stops while a film
-' plays (one decoder) — the film itself keeps the screen awake then.
+' See docs/QUESTIONS.md about certification rule 4.5. Roku decodes one
+' video at a time, so the clip is stopped as soon as a film is on its way
+' (being built or faded in), not at the moment the film starts: stopping one
+' and starting the other in the same instant made films fail to open.
 
 sub initFilm()
     m.film = m.top.FindNode("artVideo")
     m.film.ObserveField("state", "onFilmState")
     m.filmLayer = invalid
+    m.filmLog = []
+    m.filmStartedAt = 0
     m.awake = m.top.FindNode("keepAwake")
+    m.awakeOn = false
     content = CreateObject("roSGNode", "ContentNode")
     content.url = "pkg:/media/keepawake.mp4"
     content.streamFormat = "mp4"
@@ -31,27 +40,105 @@ sub initFilm()
     m.vp9 = false
     vp9 = info.CanDecodeVideo({ Codec: "vp9", Container: "mkv" })
     if Util.isAA(vp9) and vp9.result = true then m.vp9 = true
-    setKeepAwake(m.config.keepAwake)
+    updateKeepAwake()
 end sub
 
-sub setKeepAwake(on as boolean)
-    if on and m.filmLayer = invalid then
-        if m.awake.state <> "playing" then m.awake.control = "play"
+' Runs every tick: the clip plays only while no film is playing or due.
+sub updateKeepAwake()
+    want = m.config.keepAwake and m.filmLayer = invalid and not filmDue()
+    if want = m.awakeOn then return
+    m.awakeOn = want
+    if want then
+        m.awake.control = "play"
     else
         m.awake.control = "stop"
     end if
 end sub
+
+' Kept for the developer menu's toggle.
+sub setKeepAwake(on as boolean)
+    m.awakeOn = not on
+    updateKeepAwake()
+end sub
+
+' A film is about to play: one of the layers holds a video that has not
+' started yet (being built ahead of its slot, or fading in).
+function filmDue() as boolean
+    if m.layers = invalid then return false
+    for each L in m.layers
+        if L.isVideo and not L.filmStarted and L.key <> invalid then return true
+    end for
+    return false
+end function
+
+sub onFilmProbed(r as object, ctx as object)
+    e = m.cache[ctx.key]
+    if e = invalid then return
+    status = Int(Util.num(r.status))
+    if status = 401 or status = 403 or status = 404 or status = 410 then
+        ' The host refuses it outright: do not make the Video node find out
+        ' (and the wall wait) — go straight to the next copy.
+        noteFilm(e.id + " refused " + status.ToStr() + " " + Util.urlSummary(ctx.url))
+        dropFilmUrl(e, ctx.url)
+        return
+    end if
+    if r.ok <> true then return
+    t = Util.strOr(r.contentType, "")
+    e.filmTypes[ctx.url] = t
+    e.filmBytes[ctx.url] = Util.num(r.bytes)
+    unplayable = Left(t, 6) = "image/" or Left(t, 5) = "text/" or ((Instr(1, t, "webm") > 0 or Instr(1, t, "ogg") > 0) and not m.vp9)
+    if not unplayable then return
+    ' Not a film this Roku can play: drop that copy before anyone tries it.
+    noteFilm(e.id + " skip " + t)
+    dropFilmUrl(e, ctx.url)
+end sub
+
+' Removes one copy of a film, keeping the one playing (if any) in place.
+sub dropFilmUrl(e as object, url as string)
+    playing = invalid
+    if e.filmIndex < e.filmUrls.Count() then playing = e.filmUrls[e.filmIndex]
+    kept = []
+    for each u in e.filmUrls
+        if u <> url then kept.Push(u)
+    end for
+    e.filmUrls = kept
+    e.filmIndex = 0
+    if playing <> invalid and playing <> url then
+        for i = 0 to kept.Count() - 1
+            if kept[i] = playing then e.filmIndex = i
+        end for
+    end if
+    if kept.Count() = 0 then e.stillFallback = true
+end sub
+
+' The Video node's streamFormat for a film, from what the server said it is.
+function streamFormatFor(e as object, url as string) as string
+    t = e.filmTypes[url]
+    if t <> invalid then
+        if Instr(1, t, "mp4") > 0 or Instr(1, t, "quicktime") > 0 or Instr(1, t, "m4v") > 0 then return "mp4"
+        if Instr(1, t, "webm") > 0 or Instr(1, t, "matroska") > 0 then return "mkv"
+        if Instr(1, t, "mpegurl") > 0 then return "hls"
+        if Instr(1, t, "dash") > 0 then return "dash"
+    end if
+    return MediaPick.streamFormatOf(url)
+end function
 
 sub startFilm(idx as integer)
     L = m.layers[idx]
     e = m.cache[L.entryKey]
     if e = invalid or not L.isVideo then return
     if L.target <> invalid and (L.target.paused or m.blackout) then return
-    url = e.filmUrls[0]
-    kept = keptPathFor(url)
+    if e.filmIndex >= e.filmUrls.Count() then
+        L.isVideo = false
+        return
+    end if
+    source = e.filmUrls[e.filmIndex]
+    url = source
+    kept = keptPathFor(source)
     if kept <> invalid and not e.keptFilmFailed then url = kept
 
     m.awake.control = "stop"
+    m.awakeOn = false
     stopFilmQuietly()
     parent = m.film.GetParent()
     if parent <> invalid then parent.RemoveChild(m.film)
@@ -64,7 +151,7 @@ sub startFilm(idx as integer)
 
     content = CreateObject("roSGNode", "ContentNode")
     content.url = url
-    content.streamFormat = MediaPick.streamFormatOf(e.filmUrls[0])
+    content.streamFormat = streamFormatFor(e, source)
     ' In step: a screen joining mid-slot starts the film where the others are.
     if Util.isNumber(e.durationMs) and e.durationMs > 0 and L.target <> invalid then
         at = (L.target.offsetMs - Util.floor(L.target.offsetMs / e.durationMs) * e.durationMs) / 1000.0
@@ -75,15 +162,15 @@ sub startFilm(idx as integer)
     m.film.visible = true
     m.film.control = "play"
     m.filmLayer = idx
+    m.filmStartedAt = monoNow()
     L.filmStarted = true
     L.filmUrl = url
     L.playEnded = false
+    noteFilm(e.id + " play " + content.streamFormat + " " + Util.urlSummary(source))
 end sub
 
-' Stops the film and gives the screen back to the keep-awake clip.
 sub stopFilm()
     stopFilmQuietly()
-    setKeepAwake(m.config.keepAwake)
 end sub
 
 sub stopFilmQuietly()
@@ -103,6 +190,7 @@ sub onFilmState(event as object)
     L = m.layers[m.filmLayer]
     e = m.cache[L.entryKey]
     state = event.GetData()
+    noteFilm(Util.strOr(L.itemId, "?") + " " + state + " " + Str(Int(Util.num(m.film.position))).Trim() + "s")
     if state = "playing" then
         d = m.film.duration
         if Util.isNumber(d) and d > 0 then
@@ -114,17 +202,33 @@ sub onFilmState(event as object)
     else if state = "finished" then
         onFilmEnded(L)
     else if state = "error" then
-        if e <> invalid and L.filmUrl <> e.filmUrls[0] and not e.keptFilmFailed then
-            ' The stick's copy would not play from local storage here: stream it.
-            e.keptFilmFailed = true
-            idx = m.filmLayer
-            stopFilmQuietly()
-            startFilm(idx)
-            return
+        ' Roku's own words, for the debug panel and the dashboard (state.error).
+        why = Util.strOr(m.film.errorMsg, "")
+        if Util.str(m.film.errorStr) <> invalid then why = why + " (" + m.film.errorStr + ")"
+        why = why + " code " + Str(Util.num(m.film.errorCode)).Trim()
+        noteFilm(Util.strOr(L.itemId, "?") + " ERROR " + why)
+        noteFilm("  url " + Util.urlSummary(L.filmUrl))
+        idx = m.filmLayer
+        if e <> invalid then
+            e.filmError = why
+            if L.filmUrl <> e.filmUrls[e.filmIndex] and not e.keptFilmFailed then
+                ' The stick's copy would not play from local storage here: stream it.
+                e.keptFilmFailed = true
+                stopFilmQuietly()
+                startFilm(idx)
+                return
+            end if
+            if e.filmIndex + 1 < e.filmUrls.Count() then
+                ' The next copy may live on a friendlier host or in a friendlier format.
+                e.filmIndex += 1
+                stopFilmQuietly()
+                startFilm(idx)
+                return
+            end if
+            ' A film this Roku cannot play: its still stays up for the slot.
+            e.stillFallback = true
         end if
-        ' A film this Roku cannot play: its still stays up for the slot.
-        if e <> invalid then e.stillFallback = true
-        m.S.lastError = "could not play " + L.itemId
+        m.S.lastError = Left("could not play " + Util.strOr(L.itemId, "?") + ": " + why, 200)
         L.isVideo = false
         stopFilm()
     end if
@@ -158,12 +262,16 @@ sub syncPlayback(L as object, target as object, nowLocal as double)
     end if
     if m.film.state = "paused" and not L.playEnded then m.film.control = "resume"
     d = m.film.duration
-    ' Seeking rebuffers on a Roku, so drift is corrected gently: only when
-    ' more than 1.5 s out, at most every 10 s, never near either end.
-    if not target.estimated and Util.isNumber(d) and d > 3 and nowLocal - L.lastSeek > 10000 and m.film.state = "playing" then
+    ' Every seek makes a Roku rebuffer a streamed file, and a film seeked over
+    ' and over while it is still filling its buffer stalls and errors. So the
+    ' film is left alone for its first 20 s, and then corrected only when it
+    ' is more than 3 s out of step, at most once a minute.
+    if L.lastSeek = 0 then L.lastSeek = m.filmStartedAt
+    if not target.estimated and Util.isNumber(d) and d > 10 and nowLocal - L.lastSeek > 60000 and nowLocal - m.filmStartedAt > 20000 and m.film.state = "playing" then
         dms = d * 1000
         expected = (target.offsetMs - Util.floor(target.offsetMs / dms) * dms) / 1000.0
-        if expected > 1 and expected < d - 1 and Abs(m.film.position - expected) > 1.5 then
+        if expected > 2 and expected < d - 3 and Abs(m.film.position - expected) > 3 then
+            noteFilm(Util.strOr(L.itemId, "?") + " seek " + Str(Int(m.film.position)).Trim() + "→" + Str(Int(expected)).Trim())
             m.film.seek = expected
             L.lastSeek = nowLocal
         end if
@@ -172,4 +280,10 @@ end sub
 
 sub pauseFilmForBlackout()
     if m.filmLayer <> invalid and m.film.state = "playing" then m.film.control = "pause"
+end sub
+
+' The last few film events, for the debug panel.
+sub noteFilm(text as string)
+    m.filmLog.Unshift(Util.localHhmmss(Util.wallMs()) + " " + text)
+    if m.filmLog.Count() > 8 then m.filmLog.Pop()
 end sub

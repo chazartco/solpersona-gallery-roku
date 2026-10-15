@@ -140,7 +140,9 @@ function items(req) {
   ];
   if (film) {
     list.push({ ...item(req, 'v:5', 'Signal Test', 'Mock Studio', 2026), kind: 'VIDEO',
-      media: { original: `${b}/media/film.mp4`, display: `${b}/media/p5-display.webp`, poster: `${b}/media/p5-poster.webp`, fallbacks: [] } });
+      // Like production: the master in `original` (here missing, so a player
+      // that ignored `screen` would fail), the TV-sized film in `screen`.
+      media: { original: `${b}/media/film-master.mp4`, screen: `${b}/media/film.mp4`, display: `${b}/media/p5-display.webp`, poster: `${b}/media/p5-poster.webp`, fallbacks: [] } });
   }
   list.push({ ...item(req, 'v:6', 'A Film in WebM', 'Mock Studio', 2026), kind: 'VIDEO',
     media: { original: `${b}/media/film.webm`, display: `${b}/media/p5-display.webp`, poster: `${b}/media/p5-poster.webp`, fallbacks: [] } });

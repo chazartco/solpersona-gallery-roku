@@ -61,6 +61,7 @@ function ensureEntry(item as object, settings as object) as object
         file: "", url: "", via: "", bytes: 0, w: 0, h: 0
         error: invalid, failedAt: 0, decoder: invalid
         stillFallback: false, durationMs: invalid, keptFilmFailed: false
+        filmTypes: {}, filmBytes: {}, filmIndex: 0, filmError: invalid
     }
     if item.kind = "VIDEO" then
         for each url in candidates
@@ -69,6 +70,10 @@ function ensureEntry(item as object, settings as object) as object
         e.stills = decodable(MediaPick.videoStills(item))
         ' A film this Roku cannot play shows its still for the slot (SPEC §6.3).
         if e.filmUrls.Count() = 0 then e.stillFallback = true
+        ' Ask each film what it is: the URL may have no extension.
+        for each url in e.filmUrls
+            mediaSend("probe", { url: url }, { key: key, url: url })
+        end for
     else
         e.stills = decodable(candidates)
     end if

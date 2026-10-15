@@ -56,7 +56,7 @@ sub runTask()
             if now > job.deadline then
                 job.xfer.AsyncCancel()
                 inflight.Delete(key)
-                m.fs.Delete(job.part)
+                if job.part <> "" then m.fs.Delete(job.part)
                 reply(job.req, { ok: false, status: 0, network: true, url: job.req.url })
             end if
         end for
@@ -71,6 +71,8 @@ sub handle(req as object, port as object, inflight as object)
     op = req.op
     if op = "fetch" then
         startDownload(req, port, inflight)
+    else if op = "probe" then
+        startProbe(req, port, inflight)
     else if op = "pin" then
         m.pinned = {}
         if Util.isArray(req.urls) then
@@ -175,6 +177,10 @@ sub finishDownload(msg as object, inflight as object)
     if job = invalid or msg.GetInt() <> 1 then return
     inflight.Delete(key)
     code = msg.GetResponseCode()
+    if job.probe = true then
+        finishProbe(job, msg, code)
+        return
+    end if
     if code < 200 or code >= 300 then
         m.fs.Delete(job.part)
         reply(job.req, { ok: false, status: Util.max(0, code), network: code <= 0, url: job.req.url })
@@ -399,4 +405,39 @@ sub reply(req as object, out as object)
     out.id = req.id
     out.op = req.op
     m.top.response = out
+end sub
+
+' --- What a film is ----------------------------------------------------------------
+'
+' A HEAD request for a film's URL: its Content-Type decides the stream format
+' (many media URLs carry no extension, and a WebM sent to the Video node as
+' "mp4" fails), and Content-Length is shown in the debug panel.
+'   probe { url } → { ok, status, contentType, bytes, url }
+
+sub startProbe(req as object, port as object, inflight as object)
+    xfer = CreateObject("roUrlTransfer")
+    xfer.SetMessagePort(port)
+    xfer.SetUrl(req.url)
+    if LCase(Left(req.url, 8)) = "https://" then
+        xfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
+        xfer.InitClientCertificates()
+    end if
+    if not xfer.AsyncHead() then
+        reply(req, { ok: false, status: 0, network: true, url: req.url })
+        return
+    end if
+    inflight[xfer.GetIdentity().ToStr()] = { xfer: xfer, req: req, probe: true, part: "", deadline: Util.wallMs() + 20000 }
+end sub
+
+sub finishProbe(job as object, msg as object, code as integer)
+    out = { ok: code >= 200 and code < 300, status: Util.max(0, code), network: code <= 0, url: job.req.url, contentType: "", bytes: 0 }
+    headers = msg.GetResponseHeaders()
+    if Util.isAA(headers) then
+        for each name in headers
+            lower = LCase(name)
+            if lower = "content-type" then out.contentType = LCase(headers[name])
+            if lower = "content-length" then out.bytes = Val(headers[name])
+        end for
+    end if
+    reply(job.req, out)
 end sub

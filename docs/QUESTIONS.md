@@ -69,7 +69,72 @@ launches a channel at power-on. The closest:
 **Verify on hardware:** whether the channel survives a TV's own standby on the
 models you test, and whether Roku's "Fast TV start" brings it back.
 
-### 4. Turning the panel off outside opening hours
+### 4. Video originals on a restricted IPFS gateway — server fix needed
+
+**Found on hardware, 2026-10-14 (Roku Ultra 4800X, production).** Several
+videos in a real gallery never played: their `media.original` and every
+`fallbacks` entry point at `https://solpersona.mypinata.cloud/ipfs/…`, and that
+dedicated Pinata gateway answers **401** "This content cannot be requested
+through the gateway you are using" (ERR_ID 00024) to *every* client — a Roku,
+curl, with or without a `Referer`/`Origin` of solpersona.com. The site itself
+looks fine because its pages show copies on DigitalOcean Spaces
+(`nyc3.digitaloceanspaces.com/solpersona-vault/…`), but a screen is given the
+gateway URL. Images are unaffected because their `display` copy lives on Spaces.
+
+SPEC §6.1 says media URLs are public and need no authentication, so this is a
+server-side gap. Pinata's public gateway (`gateway.pinata.cloud`) does serve the
+same CIDs, but it answered the Roku with **429 Too Many Requests** and **400**, so
+the channel does not use it.
+
+**What the channel does now:** it sends a HEAD request for each film copy when
+the piece comes up, skips copies the host refuses (401/403/404/410) without
+making the Video node try them, tries the remaining copies in order, and
+otherwise shows the still for the slot. The refusal and Roku's own error text
+appear in the debug overlay (FILM) and in `state.error` on the dashboard.
+
+**The films are already on Spaces.** For "Unseen Realms" (`a:4b1b9844…`) the
+playlist sent `https://solpersona.mypinata.cloud/ipfs/bafybeifozqvf5…cegnx5xm.mp4`
+(401), while the same file is at
+`https://nyc3.digitaloceanspaces.com/solpersona-vault/ipfs/bafybeifozqvf5…cegnx5xm.mp4`
+— `200 video/mp4`, 149 MB, `Accept-Ranges: bytes`, answering a Roku user agent
+normally. Same file name, different host.
+
+**Ask:**
+- **In the device API (`/sync`, `/sample`, takeover items), send the Spaces URL
+  as `media.original`** for films (and for any `display`/`poster` that points at
+  the gateway), with the IPFS URL at most in `fallbacks`. The website already
+  uses Spaces; the screen playlist does not.
+- (Alternatives, if Spaces cannot be used:) gateway URLs that work for screens: a Pinata gateway access token
+  issued for screens, or Pinata's "allow any content" mode on a separate
+  gateway used only for screen playlists.
+- Or a range-capable proxy on SolPersona (e.g. `/api/v1/device/media/<id>`).
+
+**Second finding, same item, once the Spaces copy was used: the film is too
+big for a TV.** The Roku's decoder rejected it with "image height too high …
+H.264, AVC … code -5". The file is **2048×2048, H.264 Main, 60 fps, ~80 Mbps**
+(149 MB for 14.7 s). Roku players decode H.264 only up to 1920×1080 (4K needs
+HEVC/VP9), and ~80 Mbps is far beyond what a TV on Wi-Fi streams reliably —
+the likely reason other films "played a little and failed".
+
+**Ask: a screen copy of every film**, made once on upload like the image
+`display` copies, and sent to screens as `media.original` (the artist's master
+stays in `fallbacks`, or on the website only):
+
+- H.264 High profile, MP4, **fitted inside 1920×1080** (a square film becomes
+  1080×1080; a portrait one 608×1080), **30 fps** (or the source rate if ≤ 30),
+  **≈ 8 Mbps** video, AAC 128–192 kb/s stereo.
+- **"faststart"** (`moov` atom at the front, e.g. `ffmpeg -movflags +faststart`)
+  so playback starts without reading to the end of the file.
+- Example: `ffmpeg -i master.mp4 -vf "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease,fps=30" -c:v libx264 -profile:v high -preset slow -b:v 8M -maxrate 10M -bufsize 16M -c:a aac -b:a 160k -movflags +faststart screen.mp4`
+
+That one copy plays on every Roku, smart TV, Raspberry Pi and browser. (Later,
+an optional HEVC 4K copy could serve 4K Rokus; not needed now.)
+
+Related, seen on the same item: the still sent for that video was 150×150 px, so
+the slot shows a very soft picture when the film cannot play. A `display` copy
+of a video's poster at ~1000 px (as for stills) would fix that.
+
+### 5. Turning the panel off outside opening hours
 
 `schedule` asks for standby where possible. Roku gives channels no way to turn
 the panel off (ECP `PowerOff` exists only for external controllers; a channel

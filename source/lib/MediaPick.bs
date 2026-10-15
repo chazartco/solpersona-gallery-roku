@@ -29,8 +29,18 @@ namespace MediaPick
         if Util.isArray(m.fallbacks) then fallbacks = m.fallbacks
         list = []
         if item.kind = "VIDEO" then
-            list.Push(m.original)
-            list.Append(fallbacks)
+            ' media.screen is the film made for screens: H.264 High inside
+            ' 1920×1080, ≤ 30 fps, ~8 Mbps, faststart (SPEC §6.1, §6.3).
+            ' `original` is the artist's master — often too large for a TV
+            ' decoder — and `fallbacks` are alternates of the master only,
+            ' so they are not used when a screen copy exists.
+            screen = Util.str(m.screen)
+            if screen <> invalid then
+                list.Push(screen)
+            else
+                list.Push(m.original)
+                list.Append(fallbacks)
+            end if
         else
             first = MediaPick.chooseStill(settings.imageQuality, caps.screenWidth, caps.originals, m.original, m.display)
             list.Push(first)

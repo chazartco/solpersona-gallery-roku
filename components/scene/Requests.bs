@@ -155,6 +155,8 @@ sub handleMediaResponse(r as dynamic)
         else
             onEntryFetched(r, ctx)
         end if
+    else if ctx.op = "probe" then
+        onFilmProbed(r, ctx)
     else if ctx.op = "keptList" or ctx.op = "keptPrune" or ctx.op = "keptReset" then
         onKeptListed(r, ctx)
     end if

@@ -57,6 +57,10 @@ for (const file of dirs.flatMap((d) => walk(join(root, d)))) {
     if (inClass) return;
     const decl = /^(?:function|sub)\s+(\w+)/i.exec(line) || /^const\s+(\w+)/i.exec(line);
     if (decl) members.add(decl[1].toLowerCase());
+    // A CONSTANT used by its exact upper-case name is meant; only a
+    // differently-cased local (w beside const W) is the trap.
+    const constDecl = /^const\s+(\w+)/i.exec(line);
+    if (constDecl && /^[A-Z0-9_]+$/.test(constDecl[1])) (members.exactConsts ??= new Set()).add(constDecl[1]);
   });
   for (const block of blocks) {
     for (let i = block.start + 1; i < block.end; i += 1) {
@@ -68,6 +72,7 @@ for (const file of dirs.flatMap((d) => walk(join(root, d)))) {
         const name = m[2];
         const lower = name.toLowerCase();
         if (!block.members.has(lower)) continue;
+        if (block.members.exactConsts?.has(name)) continue;
         if (decl && decl[1] === name && m.index <= decl.index + decl[0].length) continue;
         if (m[4] === '(' || m[4] === ':') continue; // a call, or an AA key: fine
         console.log(`${relative(root, file)}:${i + 1}: '${name}' resolves to ${block.ns}.${name} inside namespace ${block.ns}`);

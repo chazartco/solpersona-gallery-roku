@@ -211,6 +211,24 @@ namespace Util
         return out
     end function
 
+    ' "host/path?name1&name2" — a URL for the debug panel, with query values
+    ' left out (they can hold gateway tokens or signatures).
+    function urlSummary(url as dynamic) as string
+        if not Util.isString(url) then return "—"
+        rest = Util.stripScheme(url)
+        q = Instr(1, url, "?")
+        names = []
+        if q > 0 then
+            for each pair in Mid(url, q + 1).Split("&")
+                eq = Instr(1, pair, "=")
+                if eq > 0 then names.Push(Left(pair, eq - 1)) else names.Push(pair)
+            end for
+        end if
+        if Len(rest) > 70 then rest = Left(rest, 40) + "…" + Right(rest, 28)
+        if names.Count() > 0 then rest = rest + "?" + names.Join("&")
+        return rest
+    end function
+
     function keysOf(aa as object) as object
         out = []
         for each k in aa

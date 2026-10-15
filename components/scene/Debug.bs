@@ -30,6 +30,11 @@ sub renderDebug()
     lines.Push(kv("screen", m.caps.screenWidth.ToStr() + "x" + m.caps.screenHeight.ToStr() + " originals " + boolText(m.caps.originals) + " vp9 " + boolText(m.vp9 = true)))
     lines.Push(kv("error", Util.strOr(S.lastError, "—")))
     if Util.num(m.internalFailures) > 0 then lines.Push(kv("caught", Util.intString(m.internalFailures) + " internal errors"))
+    if m.filmLog.Count() > 0 then
+        lines.Push("")
+        lines.Push("FILM")
+        lines.Append(m.filmLog)
+    end if
 
     show = S.show
     if show <> invalid then
@@ -75,6 +80,14 @@ sub renderDebug()
         detail = e.status
         if e.status = "ready" then detail = "ready " + e.via + " " + e.w.ToStr() + "x" + e.h.ToStr() + " " + Util.extensionOf(e.url)
         if e.stillFallback then detail = detail + " still"
+        if e.kind = "VIDEO" and e.filmUrls.Count() > 0 then
+            u = e.filmUrls[Util.min(e.filmIndex, e.filmUrls.Count() - 1)]
+            t = e.filmTypes[u]
+            if t = invalid then t = "type ?"
+            detail = detail + " · film " + t + " " + Str(Int(Util.num(e.filmBytes[u]) / 1048576)).Trim() + "MB"
+            lines.Push("  film " + Util.urlSummary(u))
+        end if
+        if e.filmError <> invalid then detail = detail + " · " + e.filmError
         if e.error <> invalid then detail = detail + " · " + e.error
         lines.Push(kv(e.id, detail))
         n += 1

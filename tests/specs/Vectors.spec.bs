@@ -129,6 +129,14 @@ namespace tests
             m.assertEqual(MediaPick.stillOf(item), "D")
         end function
 
+        @it("plays a video's screen copy, without the master's fallbacks")
+        function _()
+            item = { id: "a:7", kind: "VIDEO", media: { original: "https://cdn/master.mp4", screen: "https://cdn/screen.mp4", display: "D", poster: "P", fallbacks: ["https://gw/master.mp4"] } }
+            m.assertEqual(MediaPick.candidates(item, { imageQuality: "ORIGINAL" }, { screenWidth: 3840, originals: true }), ["https://cdn/screen.mp4"])
+            item.media.screen = invalid
+            m.assertEqual(MediaPick.candidates(item, { imageQuality: "AUTO" }, { screenWidth: 1920, originals: true }), ["https://cdn/master.mp4", "https://gw/master.mp4"], "no screen copy yet: the master and its fallbacks")
+        end function
+
         @it("knows what this platform cannot play or decode")
         function _()
             m.assertFalse(MediaPick.videoPlayable("https://x/film.webm"))

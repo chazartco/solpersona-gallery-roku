@@ -61,6 +61,7 @@ end sub
 sub tick()
     try
         tickNow()
+        updateKeepAwake()
     catch e
         noteFailure("tick", e)
     end try
