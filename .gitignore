@@ -4,3 +4,4 @@ build/
 *.pkg
 *.log
 .DS_Store
+.node-xhr-sync-*
