@@ -31,9 +31,8 @@ Background for each is in [QUESTIONS.md](QUESTIONS.md) §1–2.
 - On that Roku:
   - **Settings → Theme → Screensavers → Change wait time → Disabled.**
     Owners will do the same.
-  - **Settings → System → Advanced system settings → Control by mobile apps →
-    Network access → Permissive.** This lets the soak test read memory. Set
-    it back afterwards if you like.
+  - No telnet session left open to port 8080: the soak test reads memory
+    there, and the Roku takes one client at a time.
 - A SolPersona **test account for the reviewer**, linked to nothing, with a
   small public gallery of test images and at least one film. Its email and
   password go only into the dashboard's reviewer notes, never into this repo.
@@ -77,9 +76,12 @@ parameters.
 On the Roku you keep:
 
 ```sh
-telnet <ROKU_IP> 8080      # if 8080 is closed on newer Roku OS, use the
-genkey                     # dashboard's "Generate key" / Utilities page
+telnet <ROKU_IP> 8080
+genkey
 ```
+
+Close that telnet session afterwards (type `exit`). The soak test needs the
+port.
 
 - Store the printed **password** and **DevID** in your password manager.
 - Add `ROKU_SIGNING_PASSWORD=<password>` to `.env`.
@@ -211,16 +213,16 @@ make soak SOAK="--no-package"              # without signing (no key yet)
 1. Builds the zip, and has the Roku install it as the dev channel and sign
    that same zip into `build/solpersona-gallery-roku.pkg`. What runs is what
    gets uploaded.
-2. Every 2 minutes it records the channel's memory and CPU
-   (`/query/chanperf`), its texture memory (`/query/r2d2-bitmaps`) and which
-   app is in front, including whether the screensaver is up
-   (`/query/active-app`). All of these are ECP calls on port 8060. On Roku
-   models whose developer console (telnet 8080) is open, that's used if ECP
-   refuses. It's closed on Roku OS 16.
+2. Every 2 minutes it records the channel's memory and CPU (`chanperf`) and
+   texture memory (`r2d2_bitmaps`) from the developer console on telnet
+   port 8080. Where ECP's Network access is Permissive, it uses ECP's
+   `/query/chanperf` instead. It also records which app is in front,
+   including whether the screensaver is up (ECP `/query/active-app`, allowed
+   in Limited mode).
 3. Every 10 minutes it takes a screenshot.
 4. The whole time it listens to the BrightScript console (port 8085) for
-   crashes and debugger stops. **Close `make debug` first**, because the Roku
-   accepts one console client.
+   crashes and debugger stops. **Close `make debug` and any telnet session
+   to 8080 first**, because the Roku accepts one client on each.
 5. At the end it writes `build/soak/<time>/report.html` (open it in a
    browser) and `report.md`, plus `samples.json`, `console.log` and
    screenshots. **Ctrl-C** ends early and still writes the report. A partial
@@ -237,8 +239,8 @@ make soak SOAK="--no-package"              # without signing (no key yet)
 It only warns if the screensaver appeared: that means the Roku's
 screensaver is still on, not that the channel is at fault.
 
-**Before you start:** turn the screensaver off and set Network access to
-Permissive (see [What you need](#what-you-need)). Without Permissive the run
-stops at once and tells you. Leave the TV on, and don't touch the remote for
+**Before you start:** turn the screensaver off and close other console
+sessions (see [What you need](#what-you-need)). If it can't read memory, the
+run stops at once and says why. Leave the TV on, and don't touch the remote for
 the length of the run. Roku screenshots leave out video, so a film shows as
 black in them; that's expected.

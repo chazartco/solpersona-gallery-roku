@@ -7,12 +7,12 @@
 // 1. Signs build/solpersona-gallery-roku.zip on the Roku (tools/roku.mjs
 //    package: installs it as the dev channel, then signs that same zip), so
 //    what runs is what is uploaded. --no-package just installs the zip.
-// 2. Every --mem-mins: the channel's memory and CPU, texture memory, and
-//    which app is in front / whether the screensaver is up — from ECP (port
-//    8060: query/chanperf, query/r2d2-bitmaps, query/active-app). The perf
-//    queries need Settings → System → Advanced system settings → Control by
-//    mobile apps → Network access → Permissive; on Rokus whose developer
-//    console (telnet 8080) is open, that is used when ECP refuses.
+// 2. Every --mem-mins: the channel's memory and CPU and the texture memory
+//    (developer console, telnet 8080: `chanperf`, `r2d2_bitmaps`; or ECP's
+//    query/chanperf and query/r2d2-bitmaps where Network access is
+//    Permissive), and which app is in front / whether the screensaver is up
+//    (ECP query/active-app). The console takes one client: close any telnet
+//    session to 8080 first.
 // 3. Every --shot-mins: a screenshot.
 // 4. The whole time: the BrightScript console (port 8085), for crashes. Close
 //    `make debug` first — the Roku takes one console client.
@@ -183,7 +183,7 @@ async function readPerf() {
     perfSource = 'telnet';
     return { raw: `$ chanperf\n${perfText}\n\n$ r2d2_bitmaps\n${bmpText}\n`, ...parsed, ...parseBitmaps(bmpText) };
   }
-  return { raw: `ECP query/chanperf: ${ecpError}; developer console: ${perfText.trim() || 'closed'}`, running: null, note: `ECP ${ecpError}, port 8080 closed` };
+  return { raw: `ECP query/chanperf: ${ecpError}; developer console: ${perfText.trim() || 'no answer'}`, running: null, note: `ECP ${ecpError}, port 8080 busy or no answer` };
 }
 
 // The BrightScript console for the whole run: a crash or a STOP shows up here.
@@ -422,8 +422,9 @@ if (first.memKiB == null && !opts['allow-no-memory']) {
   writeFileSync(join(dir, 'perf-last.txt'), first.raw);
   console.error(`
 The Roku will not report the channel's memory (${first.note ?? 'no answer'}).
-Turn on: Settings → System → Advanced system settings → Control by mobile apps
-→ Network access → Permissive, then run again. (--allow-no-memory runs anyway.)`);
+Close any other telnet session to ${host}:8080 (the Roku takes one), or turn on
+Settings → System → Advanced system settings → Control by mobile apps →
+Network access → Permissive, then run again. (--allow-no-memory runs anyway.)`);
   process.exit(2);
 }
 const endAt = started.getTime() + minutes * 60000;
