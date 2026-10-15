@@ -62,6 +62,7 @@ function ensureEntry(item as object, settings as object) as object
         error: invalid, failedAt: 0, decoder: invalid
         stillFallback: false, durationMs: invalid, keptFilmFailed: false
         filmTypes: {}, filmBytes: {}, filmIndex: 0, filmError: invalid
+        skipped: []
     }
     if item.kind = "VIDEO" then
         for each url in candidates
@@ -76,10 +77,21 @@ function ensureEntry(item as object, settings as object) as object
         end for
     else
         e.stills = decodable(candidates)
+        for each url in candidates
+            if not MediaPick.stillDecodable(url) then noteSkip(e, url, "not decodable here")
+        end for
     end if
     m.cache[key] = e
     return e
 end function
+
+' Why a copy was passed over, kept for the debug overlay (a later copy
+' that works clears e.error, so the reason would be lost).
+sub noteSkip(e as object, url as dynamic, why as string)
+    if e.skipped = invalid then e.skipped = []
+    if e.skipped.Count() >= 4 then return
+    e.skipped.Push(Util.urlSummary(Util.strOr(url, "")) + " — " + why)
+end sub
 
 function decodable(urls as object) as object
     out = []
@@ -141,6 +153,7 @@ sub onEntryFetched(r as object, ctx as object)
         else
             e.error = "HTTP " + Str(r.status).Trim()
         end if
+        noteSkip(e, e.url, e.error)
         e.ci += 1
         e.status = "queued"
     end if
@@ -189,6 +202,7 @@ sub onDecoderStatus(event as object)
         ' session (docs/CONFORMANCE-RESULTS.md records which formats fail).
         m.badUrls[e.url] = true
         e.error = "decode " + Util.extensionOf(e.url)
+        noteSkip(e, e.url, "decode failed")
         releaseDecoder(e)
         e.ci += 1
         e.status = "queued"
@@ -265,6 +279,7 @@ sub manageCache(now as double)
             else if nowLocal - Util.num(e.decodeStarted, nowLocal) > 20000 then
                 releaseDecoder(e)
                 e.error = "decode timeout " + Util.extensionOf(e.file)
+                noteSkip(e, e.url, "decode took over 20 s")
                 m.badUrls[e.url] = true
                 e.ci += 1
                 e.status = "queued"

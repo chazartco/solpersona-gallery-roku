@@ -69,6 +69,23 @@ sub renderDebug()
         end if
         lines.Push(kv("on screen", onWall))
         lines.Push(kv("holding", Util.strOr(m.holding, "—")))
+        ' The picture due now (on the wall or not yet).
+        pe = m.cache[entryKeyFor(t.item, t.settings)]
+        if pe <> invalid then
+            lines.Push(kv("picture", pe.status + " " + pe.via + " " + Str(Int(Util.num(pe.w))).Trim() + "x" + Str(Int(Util.num(pe.h))).Trim() + " " + Str(Int(Util.num(pe.bytes) / 1048576)).Trim() + "MB " + Util.extensionOf(pe.file)))
+            lines.Push("  from " + Util.urlSummary(pe.url))
+            if pe.error <> invalid then lines.Push(kv("  last error", pe.error))
+            if pe.skipped <> invalid then
+                for each why in pe.skipped
+                    lines.Push("  skipped " + why)
+                end for
+            end if
+        end if
+        lines.Push(kv("layer", "ready " + boolText(cur.node.ready) + " failed " + boolText(cur.node.failed) + " op " + Str(cur.node.opacity).Trim()))
+        lines.Push("  " + Util.strOr(cur.node.pieceStatus, "—"))
+        bk = m.layers[1 - m.front]
+        lines.Push(kv("back layer", Util.strOr(bk.itemId, "—") + " ready " + boolText(bk.node.ready) + " failed " + boolText(bk.node.failed)))
+        lines.Push("  " + Util.strOr(bk.node.pieceStatus, "—"))
         if m.filmLayer <> invalid then lines.Push(kv("video", m.film.state + " " + Str(Int(m.film.position)).Trim() + "/" + Str(Int(m.film.duration)).Trim() + " s mute " + boolText(m.film.mute)))
     end if
 

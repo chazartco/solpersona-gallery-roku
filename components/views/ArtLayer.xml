@@ -17,6 +17,8 @@
         <field id="burnOffset" type="vector2d" onChange="onBurn" />
         <field id="ready" type="boolean" value="false" />
         <field id="failed" type="boolean" value="false" />
+        <!-- For the debug overlay: how the picture's decode went. -->
+        <field id="pieceStatus" type="string" />
         <field id="pieceRect" type="assocarray" />
         <field id="videoSlot" type="node" />
     </interface>

@@ -111,6 +111,7 @@ end sub
 
 sub onPieceStatus()
     status = m.piece.loadStatus
+    m.top.pieceStatus = status + " " + Str(m.piece.bitmapWidth).Trim() + "x" + Str(m.piece.bitmapHeight).Trim() + " in " + Str(Int(m.piece.width)).Trim() + "x" + Str(Int(m.piece.height)).Trim() + " " + m.piece.loadDisplayMode
     if status = "ready" then
         m.top.ready = true
     else if status = "failed" then

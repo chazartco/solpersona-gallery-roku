@@ -250,12 +250,16 @@ end sub
 ' --- Timers ----------------------------------------------------------------------------------
 
 sub everySecond()
-    expireRequests()
-    logOfflinePlay()
-    paintPairingCountdown()
-    paintIdleClock()
-    if m.config.debug then renderDebug()
-    flushPinned()
+    try
+        expireRequests()
+        logOfflinePlay()
+        paintPairingCountdown()
+        paintIdleClock()
+        flushPinned()
+        if m.config.debug then renderDebug()
+    catch e
+        noteFailure("second", e)
+    end try
 end sub
 
 ' burnInGuard: the label, the code and the idle block drift a few pixels
