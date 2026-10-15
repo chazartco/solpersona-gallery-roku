@@ -74,7 +74,6 @@ On the pairing screen press **★ five times** within five seconds:
 - **Debug overlay** — the simulator's D panel: sync status and latency, clock
   offset, show and version, position and slot progress, cache, kept files,
   commands, recent requests. Never the token.
-- **Keep the screen awake** — see [Screensaver](#screensaver-and-power).
 
 Sideloaded builds also accept launch parameters, handy for scripts:
 ```sh
@@ -84,12 +83,14 @@ Store builds ignore them (anyone on the network can send them).
 
 ### Screensaver and power
 
-A photo channel with no playing video lets the Roku screensaver start. The
-channel keeps a tiny silent clip looping under the art, with Roku's
-`disableScreenSaver`, so the wall is never interrupted; this may conflict with
-Roku certification rule 4.5 — see [`docs/QUESTIONS.md`](docs/QUESTIONS.md) §1.
-On a dedicated wall, also set **Settings → Theme → Screensavers → Change wait
-time → Disabled**.
+**Turn off the Roku's screensaver on every gallery screen.** Roku's rules
+(certification 4.5) don't let a channel hold off the system screensaver, so
+between films the Roku's own setting decides. Without this change the
+screensaver covers the art after the wait time (10 minutes by default):
+
+> **Settings → Theme → Screensavers → Change wait time → Disabled**
+
+(A playing film keeps the screen awake by itself.)
 
 Roku has no way for a channel to start itself at power-on or to put the panel
 in standby. For a wall: on a **Roku TV** turn off **Settings → System → Power →
@@ -191,28 +192,11 @@ section by section; comments say where Roku made it differ, and
 
 ## Submitting to the Roku Channel Store
 
-1. **Art.** Replace the placeholder wordmark art in `images/` (or edit
-   `tools/make-art.mjs` and run `make art`): `channel-poster_fhd.png` 540×405,
-   `channel-poster_hd.png` 290×218, `splash_fhd.jpg` 1920×1080,
-   `splash_hd.jpg` 1280×720, `splash_sd.jpg` 720×480. No transparency.
-2. **Version.** Raise `build_version` (and `minor_version` as needed) in
-   `manifest` for every submission.
-3. **Signing key** — once, on a Roku you keep: `telnet <ROKU_IP> 8080`, then
-   `genkey`. Store the printed **password** and **DevID** in your password
-   manager, never in this repo. Put the password in `.env` as
-   `ROKU_SIGNING_PASSWORD`. (To sign on another Roku later, use the Roku's
-   Utilities → Rekey with a previously signed package.)
-4. **Package.** `make package` installs the build and has the Roku sign it;
-   the `.pkg` lands in `build/`.
-5. **Check before you submit.** Run Roku's **Static Analysis** tool and the
-   certification checklist; play for an hour with the Roku's **Memory
-   Monitor**; decide the screensaver question in
-   [`docs/QUESTIONS.md`](docs/QUESTIONS.md) §1 and describe the channel to the
-   reviewer as an ambient art display that pairs by code, with **Try a sample
-   gallery** (OK on the first screen) as the way to review it without an
-   account.
-6. **Publish.** In the Roku Developer Dashboard create a public channel,
-   upload the `.pkg`, fill in the listing, and submit for certification.
+Step by step, with the reviewer notes and the automated soak test, in
+[`docs/STORE-SUBMISSION.md`](docs/STORE-SUBMISSION.md). In short: final art,
+raise `build_version`, `genkey` once on your Roku, `make soak` (signs the
+package and runs the channel for hours, with a report), then upload the
+`.pkg` in the Roku Developer Dashboard.
 
 ## Licence and security
 

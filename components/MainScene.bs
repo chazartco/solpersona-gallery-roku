@@ -130,7 +130,6 @@ function loadConfig() as object
         baseUrl: Util.trimSlashes(storeRead("baseUrl"))
         name: storeRead("name")
         debug: storeRead("debug") = "1"
-        keepAwake: storeRead("keepAwake") <> "0"
     }
     if cfg.baseUrl = "" then cfg.baseUrl = PRODUCTION_BASE
     return cfg
@@ -150,7 +149,8 @@ sub saveConfig()
     storeWrite("baseUrl", m.config.baseUrl)
     storeWrite("name", m.config.name)
     if m.config.debug then storeWrite("debug", "1") else storeWrite("debug", "0")
-    if m.config.keepAwake then storeWrite("keepAwake", "1") else storeWrite("keepAwake", "0")
+    ' Earlier builds kept a screensaver switch; it is gone.
+    storeDelete("keepAwake")
 end sub
 
 ' --- Capabilities (SPEC §3.1) ------------------------------------------------------------

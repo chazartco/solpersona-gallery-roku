@@ -5,8 +5,7 @@
     "source/**/*",
     "components/**/*",
     "images/**/*",
-    "fonts/**/*",
-    "media/**/*"
+    "fonts/**/*"
   ],
   "stagingDir": "build/staging",
   "outFile": "build/solpersona-gallery-roku.zip",

@@ -98,8 +98,6 @@ sub openMenu(kind as string)
         menu.panelWidth = 680
         menu.buttons = [{ id: "close", text: "Cancel" }, { id: "forgetConfirm", text: "Forget this account", tone: "danger" }]
     else if kind = "dev" then
-        awake = "Keep the screen awake: on"
-        if not m.config.keepAwake then awake = "Keep the screen awake: off"
         name = m.config.name
         if name = "" then name = "—"
         menu.title = "Developer settings"
@@ -109,7 +107,6 @@ sub openMenu(kind as string)
             { id: "enterBase", text: "Enter an address…" }
             { id: "enterName", text: "Name offered when registering…" }
             { id: "debug", text: debugText }
-            { id: "keepAwake", text: awake }
             { id: "close", text: "Close" }
         ]
     end if
@@ -160,11 +157,6 @@ sub onMenuSelected(event as object)
     else if id = "enterName" then
         closeMenu()
         openKeyboard("name", "Name offered when registering", m.config.name, "The person linking the screen can change it.")
-    else if id = "keepAwake" then
-        m.config.keepAwake = not m.config.keepAwake
-        saveConfig()
-        setKeepAwake(m.config.keepAwake)
-        openMenu("dev")
     end if
 end sub
 

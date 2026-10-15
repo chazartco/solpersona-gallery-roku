@@ -2,7 +2,7 @@
 '
 ' Keys: token, tokenBase, deviceId, ackSeq, pairing (an unexpired
 ' registration), snapshot (the last playlist and clock), kept ("1" while the
-' gallery is kept on the device), baseUrl, name, debug, keepAwake.
+' gallery is kept on the device), baseUrl, name, debug.
 '
 ' Every write is flushed at once: the access token is handed over exactly
 ' once (SPEC §3.3), so it must be on flash before anything else happens. The

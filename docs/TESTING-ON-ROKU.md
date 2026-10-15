@@ -196,13 +196,14 @@ Play a gallery with an MP4 film (the mock's `v:5` when ffmpeg is available).
 - Fading into and out of a film: the still fades, the film takes over after
   the fade.
 
-### Keeping awake and power
+### Screensaver and power
 
-- Set the Roku's screensaver wait to 5 minutes (**Settings → Theme →
-  Screensavers → Change wait time**) and leave stills playing for 30 minutes.
-  No screensaver should appear.
-- Turn off **Keep the screen awake** in the developer menu and repeat. The
-  screensaver should appear; that confirms what the setting does.
+- The channel does not hold off the screensaver (certification rule 4.5).
+  Set **Settings → Theme → Screensavers → Change wait time → Disabled**, as
+  the README tells owners, and leave stills playing for 30 minutes: nothing
+  covers the art.
+- With the wait at 5 minutes, the screensaver should appear over stills and
+  should not appear while a film plays.
 - On the Roku TV, note what **Auto power savings** does over several hours.
 - Pull the power and restore it. Record where the Roku comes back to (we
   expect the Roku home screen: Roku can't auto-launch a channel).

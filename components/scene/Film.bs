@@ -1,4 +1,4 @@
-' Video (SPEC §6.3) and keeping the screen awake.
+' Video (SPEC §6.3).
 '
 ' One Video node plays the films: Roku decodes one video at a time. It is
 ' moved into the front layer's video slot, over the film's still, once the
@@ -15,14 +15,10 @@
 ' duration; whole plays loop until the slot ends; an estimated slot lets the
 ' play finish (Planner.shouldHoldVideo).
 '
-' The screensaver: a SceneGraph app with no playing video lets the Roku
-' screensaver start. A wall must not be interrupted, so a tiny silent black
-' clip (media/keepawake.mp4) loops under everything, hidden, with
-' disableScreenSaver set — the documented way to hold off the screensaver.
-' See docs/QUESTIONS.md about certification rule 4.5. Roku decodes one
-' video at a time, so the clip is stopped as soon as a film is on its way
-' (being built or faded in), not at the moment the film starts: stopping one
-' and starting the other in the same instant made films fail to open.
+' The screensaver: the app does not hold it off. A playing film keeps the
+' screen awake by itself; between films the Roku's own setting decides, so a
+' gallery wall sets Settings → Theme → Screensavers → Change wait time →
+' Disabled (README, certification rule 4.5).
 
 sub initFilm()
     m.film = m.top.FindNode("artVideo")
@@ -30,46 +26,11 @@ sub initFilm()
     m.filmLayer = invalid
     m.filmLog = []
     m.filmStartedAt = 0
-    m.awake = m.top.FindNode("keepAwake")
-    m.awakeOn = false
-    content = CreateObject("roSGNode", "ContentNode")
-    content.url = "pkg:/media/keepawake.mp4"
-    content.streamFormat = "mp4"
-    m.awake.content = content
     info = CreateObject("roDeviceInfo")
     m.vp9 = false
     vp9 = info.CanDecodeVideo({ Codec: "vp9", Container: "mkv" })
     if Util.isAA(vp9) and vp9.result = true then m.vp9 = true
-    updateKeepAwake()
 end sub
-
-' Runs every tick: the clip plays only while no film is playing or due.
-sub updateKeepAwake()
-    want = m.config.keepAwake and m.filmLayer = invalid and not filmDue()
-    if want = m.awakeOn then return
-    m.awakeOn = want
-    if want then
-        m.awake.control = "play"
-    else
-        m.awake.control = "stop"
-    end if
-end sub
-
-' Kept for the developer menu's toggle.
-sub setKeepAwake(on as boolean)
-    m.awakeOn = not on
-    updateKeepAwake()
-end sub
-
-' A film is about to play: one of the layers holds a video that has not
-' started yet (being built ahead of its slot, or fading in).
-function filmDue() as boolean
-    if m.layers = invalid then return false
-    for each L in m.layers
-        if L.isVideo and not L.filmStarted and L.key <> invalid then return true
-    end for
-    return false
-end function
 
 sub onFilmProbed(r as object, ctx as object)
     e = m.cache[ctx.key]
@@ -137,8 +98,6 @@ sub startFilm(idx as integer)
     kept = keptPathFor(source)
     if kept <> invalid and not e.keptFilmFailed then url = kept
 
-    m.awake.control = "stop"
-    m.awakeOn = false
     stopFilmQuietly()
     parent = m.film.GetParent()
     if parent <> invalid then parent.RemoveChild(m.film)

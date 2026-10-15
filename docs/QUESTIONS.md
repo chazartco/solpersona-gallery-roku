@@ -12,44 +12,32 @@ Roku TV and stick (see CONFORMANCE-RESULTS.md).
 
 ## Decisions needed
 
-### 1. The screensaver vs certification rule 4.5
+### 1. The screensaver vs certification rule 4.5 — decided
 
-A SceneGraph app with no playing video lets the Roku screensaver start after the
-idle time the person set (default 10 minutes). A gallery wall must not be
-interrupted (SPEC §11 "Never sleeps").
+A SceneGraph app with no playing video lets the Roku screensaver start after
+the idle time the person set (default 10 minutes), and certification
+criterion 4.5 prohibits apps "overriding or interfering with Roku's system
+screensaver".
 
-**What the channel does:** a 2-second silent black clip
-(`media/keepawake.mp4`, 3 KB) loops in a hidden, 2×2-pixel Video node under
-everything, with `disableScreenSaver=true` — the only documented control
-(Video node fields `disableScreenSaver`, `enableScreenSaverWhilePlaying`). It
-stops while a film plays (Roku decodes one video at a time; the film keeps the
-screen awake itself).
+**Decision (owner, 2026-10-14):** the channel does not hold off the
+screensaver. The keep-awake clip that earlier builds looped under the art is
+removed, with its developer-menu switch. Owners turn the screensaver off on
+gallery screens (**Settings → Theme → Screensavers → Change wait time →
+Disabled**), as the README says. A playing film still keeps the screen awake
+by itself (the Video node's default).
 
-**The conflict:** Roku certification criterion 4.5 says apps "are prohibited
-from overriding or interfering with Roku's system screensaver". A reviewer may
-read the keep-awake clip as exactly that.
-
-**Options for the owner:**
-- Keep it on and explain in the submission notes that the channel is a
-  digital-signage / ambient-art display whose purpose is continuous display
-  (the setting is visible in the developer menu as "Keep the screen awake").
-- Ship store builds with it off and document that the Roku's own setting
-  (**Settings → Theme → Screensavers → Change wait time → Disabled**) must be
-  used on gallery walls. Change the default in `loadConfig()`
-  (`components/MainScene.bs`).
-
-### 2. Linking from a phone and certification rule 2.2
+### 2. Linking from a phone and certification rule 2.2 — decided
 
 Roku's criteria (2.2, 4.2, 4.3) push account sign-up and sign-in to happen on
 the device, and require Roku Pay / Automatic Account Link for some
-subscription apps. SolPersona Gallery sells nothing on the device, has no
-sign-in form and links by code, as many Roku channels do. The **Try a sample
-gallery** button gives reviewers a working channel without an account
-(SPEC §11b). The wording follows SPEC §11c exactly.
+subscription apps. SolPersona Gallery sells nothing on the device (and
+SolPersona sells no screens yet), has no sign-in form and links by code, as
+the other players and many Roku channels do. The wording follows SPEC §11c.
 
-**Ask:** is the SolPersona team comfortable submitting with code linking as the
-only way to show one's own gallery? If Roku asks for it, an on-device sign-in
-would need a new endpoint (not proposed here).
+**Decision (owner, 2026-10-14):** submit with code linking. The reviewer gets
+a SolPersona test account with test images (and **Try a sample gallery**
+works without one). If Roku asks for on-device sign-in, the owner is open to
+adding it; that would need a new endpoint (not proposed here).
 
 ### 3. Auto-launch at power-on
 

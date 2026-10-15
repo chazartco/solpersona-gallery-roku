@@ -18,7 +18,6 @@
              not load an image placed outside the visible area. -->
         <Group id="decoders" />
         <Rectangle id="base" width="1920" height="1080" color="0x000000FF" />
-        <Video id="keepAwake" width="2" height="2" enableUI="false" mute="true" loop="true" disableScreenSaver="true" />
         <Group id="layers">
             <ArtLayer id="layerA" opacity="0" />
             <ArtLayer id="layerB" opacity="0" />

@@ -147,6 +147,6 @@ Legend: ✅ verified in the simulation engine · 🧪 covered by unit tests in C
 | Item | Status |
 |---|---|
 | Starts on power-on | ⚠️ not possible on Roku (QUESTIONS §3) |
-| Screensaver never appears while playing | ⬜ (QUESTIONS §1 about certification) |
-| Certification rules | ⬜ run Roku's Static Analysis and Test Automation before submitting |
+| Screensaver never appears while playing | ➖ by decision the channel leaves the screensaver to the Roku's setting (QUESTIONS §1); owners disable it |
+| Certification rules | ⬜ `make soak` (docs/STORE-SUBMISSION.md) and Roku's Static Analysis before submitting |
 | README: build, install, base URL, tests | ✅ |

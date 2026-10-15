@@ -4,6 +4,7 @@
 #   make sideload   install build/solpersona-gallery-roku.zip on ROKU_IP
 #   make dev        zip + sideload
 #   make test-device run the Rooibos suite on the Roku itself
+#   make soak       sign the build, run it for hours, write a report (SOAK="--hours=8")
 #   make mock       a stand-in SolPersona on :8090 for development
 #
 # Device targets read ROKU_IP and ROKU_PASSWORD from the environment or a
@@ -12,7 +13,7 @@
 NODE_BIN := node_modules/.bin
 ZIP := build/solpersona-gallery-roku.zip
 
-.PHONY: all install lint test test-device zip sideload dev package screenshot debug mock art clean
+.PHONY: all install lint test test-device zip sideload dev package soak screenshot debug mock art clean
 
 all: lint test zip
 
@@ -44,6 +45,9 @@ test-device: node_modules
 
 package: zip
 	node tools/roku.mjs package
+
+soak: zip
+	node tools/soak.mjs $(SOAK)
 
 screenshot:
 	node tools/roku.mjs screenshot

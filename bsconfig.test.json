@@ -6,7 +6,6 @@
     "components/**/*",
     "images/**/*",
     "fonts/**/*",
-    "media/**/*",
     "tests/**/*.bs",
     { "src": "docs/solpersona/test-vectors.json", "dest": "tests/test-vectors.json" }
   ],
