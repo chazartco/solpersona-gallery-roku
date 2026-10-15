@@ -165,7 +165,13 @@ subscription requirement that implies Roku Pay. The channel is free, sells
 nothing, and has no sign-up or sign-in form (it links by code). Those
 settings make Static Analysis demand Roku Pay features (`getUserData`, the
 Partner Payouts Program).
-Then add these notes, filling in the brackets:
+
+**Reviewer notes.** The publish page (October 2026) has no reviewer-notes
+field. With no customer-account requirement set, it doesn't ask for test
+credentials either. Reviewers use **Try a sample gallery**, which the
+description and release notes mention. If certification asks for an account,
+reply to their email with the test account. Keep this text ready for that
+email, or for a notes field if the dashboard adds one:
 
 > **What it is.** An ambient art display. A SolPersona user links the screen
 > to their account by code (QR or solpersona.com/pair). Then the screen shows
